@@ -11,7 +11,7 @@ import itertools
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
 
-DEVICE = "cuda"
+DEVICE = "cpu"  # "cuda"
 
 
 class ReplayBuffer:
