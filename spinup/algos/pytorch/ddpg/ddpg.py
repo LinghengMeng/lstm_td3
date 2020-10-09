@@ -3,6 +3,7 @@ import numpy as np
 import torch
 from torch.optim import Adam
 import gym
+import pybulletgym
 import time
 import spinup.algos.pytorch.ddpg.core as core
 from spinup.utils.logx import EpochLogger
