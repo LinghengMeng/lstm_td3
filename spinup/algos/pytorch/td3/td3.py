@@ -375,6 +375,7 @@ if __name__ == '__main__':
     data_dir = osp.join(
         osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
         args.data_dir)
+    print('data_dir={}'.format(data_dir))
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
 
     td3(env_name=args.env, partially_observable=args.partially_observable,
