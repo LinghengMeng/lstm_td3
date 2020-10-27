@@ -8,8 +8,15 @@ class POMDPWrapper(gym.ObservationWrapper):
 
         # Remove velocity info
         # OpenAIGym
+        #  1. Classic Control
+        if env_name == "Pendulum-v0":
+            self.remain_obs_idx = np.arange(0, 2)
+        elif env_name == "Acrobot-v1":
+            self.remain_obs_idx = list(np.arange(0, 4))
+        elif env_name == "MountainCarContinuous-v0":
+            self.remain_obs_idx = list([0])
         #  1. MuJoCo
-        if env_name == "HalfCheetah-v3" or env_name == "HalfCheetah-v2":
+        elif env_name == "HalfCheetah-v3" or env_name == "HalfCheetah-v2":
             self.remain_obs_idx = np.arange(0, 8)
         elif env_name == "Ant-v3" or env_name == "Ant-v2":
             self.remain_obs_idx = list(np.arange(0, 13)) + list(np.arange(27, 111))

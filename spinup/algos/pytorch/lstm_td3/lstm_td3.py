@@ -759,6 +759,18 @@ def lstm_td3(env_name, seed=0,
             logger.dump_tabular()
 
 
+def str2bool(v):
+    """Function used in argument parser for converting string to bool."""
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
@@ -767,7 +779,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--max_hist_len', type=int, default=10)
-    parser.add_argument('--partially_observable', type=bool, default=True)
+    parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
     parser.add_argument('--critic_mem_pre_lstm_hid_sizes', type=tuple, default=(128,))
     parser.add_argument('--critic_mem_lstm_hid_sizes', type=tuple, default=(128,))
     parser.add_argument('--critic_cur_feature_hid_sizes', type=tuple, default=(128,))
