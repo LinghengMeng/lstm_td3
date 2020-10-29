@@ -33,8 +33,8 @@ class ReplayBuffer:
         self.act_buf[self.ptr] = act
         self.rew_buf[self.ptr] = rew
         self.done_buf[self.ptr] = done
-        self.ptr = (self.ptr+1) % self.max_size
-        self.size = min(self.size+1, self.max_size)
+        self.ptr = (self.ptr + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
 
     def sample_batch(self, batch_size=32):
         idxs = np.random.randint(0, self.size, size=batch_size)
@@ -43,40 +43,73 @@ class ReplayBuffer:
                      act=self.act_buf[idxs],
                      rew=self.rew_buf[idxs],
                      done=self.done_buf[idxs])
-        return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in batch.items()}
+        return {k: torch.as_tensor(v, dtype=torch.float32) for k, v in batch.items()}
 
-    def sample_batch_ow(self, batch_size=32, observation_window_size=5):
+    def sample_batch_ow(self, batch_size=32, observation_window_size=5, add_past_action=False):
         """
         Sample observation within a window
         """
-        idxs = np.random.randint(observation_window_size-1, self.size, size=batch_size)
- 
+        idxs = np.random.randint(observation_window_size - 1, self.size, size=batch_size)
+
         ow_obs = np.zeros([batch_size, observation_window_size, self.obs_dim])
         ow_obs2 = np.zeros([batch_size, observation_window_size, self.obs_dim])
-        ow_act = np.zeros([batch_size, observation_window_size, self.act_dim])
+        ow_act = np.zeros([batch_size, observation_window_size - 1, self.act_dim])
+        ow_act2 = np.zeros([batch_size, observation_window_size - 1, self.act_dim])
         ow_rew = np.zeros([batch_size, observation_window_size])
         ow_done = np.zeros([batch_size, observation_window_size])
         for i in range(observation_window_size):
-            ow_obs[:, -1-i, :] = self.obs_buf[idxs-i, :]
-            ow_obs2[:, -1-i, :] = self.obs2_buf[idxs-i, :]
-            ow_done[:, -1-i] = self.done_buf[idxs-i]
-        # If there is a done in the observation window that is not the last one, then set all observations before that to 0.
-        x_idxs, y_idxs = np.where(ow_done[:, :-1]==1)
+            ow_obs[:, -1 - i, :] = self.obs_buf[idxs - i, :]
+            ow_obs2[:, -1 - i, :] = self.obs2_buf[idxs - i, :]
+            if i < (observation_window_size - 1):  # Only add actions before the current observation
+                ow_act[:, -1 - i, :] = self.act_buf[idxs - i - 1, :]
+                ow_act2[:, -1 - i, :] = self.act_buf[idxs - i, :]
+            ow_done[:, -1 - i] = self.done_buf[idxs - i]
+        # If there is a done in the observation window that is not the last one,
+        # then set all observations before that to 0.
+        x_idxs, y_idxs = np.where(ow_done[:, :-1] == 1)
         for i, x in enumerate(x_idxs):
             y = y_idxs[i]
-            for pre_y in range(0, y+1):
+            for pre_y in range(0, y + 1):
                 ow_obs[x, pre_y] = np.zeros([self.obs_dim])
                 ow_obs2[x, pre_y] = np.zeros([self.obs_dim])
+                ow_act[x, pre_y] = np.zeros([self.act_dim])
+                ow_act2[x, pre_y] = np.zeros([self.act_dim])
+
         # Construct batch data
-        batch = dict(obs=ow_obs.reshape([batch_size, -1]),    # concatenate observations in the window
-                     obs2=ow_obs2.reshape([batch_size, -1]),  # concatenate observations in the window
-                     act=self.act_buf[idxs],
-                     rew=self.rew_buf[idxs],
-                     done=self.done_buf[idxs])
-        return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in batch.items()}
+        if add_past_action:
+            # Combine past action and observation within the window
+            comb_past_act_obs = np.zeros(
+                [batch_size, int((self.obs_dim + self.act_dim) * (observation_window_size - 1) + self.obs_dim)])
+            comb_past_act_obs2 = np.zeros(
+                [batch_size, int((self.obs_dim + self.act_dim) * (observation_window_size - 1) + self.obs_dim)])
+            for i in range(observation_window_size):
+                if i < (observation_window_size - 1):
+                    comb_past_act_obs[:,
+                    i * (self.obs_dim + self.act_dim):(i + 1) * (self.obs_dim + self.act_dim)] = np.concatenate(
+                        (ow_obs[:, i], ow_act[:, i]), axis=1)
+                    comb_past_act_obs2[:,
+                    i * (self.obs_dim + self.act_dim):(i + 1) * (self.obs_dim + self.act_dim)] = np.concatenate(
+                        (ow_obs2[:, i], ow_act2[:, i]), axis=1)
+                else:
+                    comb_past_act_obs[:, -self.obs_dim:] = ow_obs[:, -1]
+                    comb_past_act_obs2[:, -self.obs_dim:] = ow_obs2[:, -1]
+
+            batch = dict(obs=comb_past_act_obs,
+                         obs2=comb_past_act_obs2,
+                         act=self.act_buf[idxs],
+                         rew=self.rew_buf[idxs],
+                         done=self.done_buf[idxs])
+        else:
+            batch = dict(obs=ow_obs.reshape([batch_size, -1]),  # concatenate observations in the window
+                         obs2=ow_obs2.reshape([batch_size, -1]),  # concatenate observations in the window
+                         act=self.act_buf[idxs],
+                         rew=self.rew_buf[idxs],
+                         done=self.done_buf[idxs])
+        return {k: torch.as_tensor(v, dtype=torch.float32) for k, v in batch.items()}
 
 
-def td3_ow(env_name, partially_observable=False, observation_window_size=5,
+def td3_ow(env_name, partially_observable=False,
+           observation_window_size=5, add_past_action=False,
            actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
            steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
            polyak=0.995, pi_lr=1e-3, q_lr=1e-3, batch_size=100, start_steps=10000,
@@ -95,17 +128,17 @@ def td3_ow(env_name, partially_observable=False, observation_window_size=5,
 
         observation_window_size:
 
-        actor_critic: The constructor method for a PyTorch Module with an ``act`` 
+        actor_critic: The constructor method for a PyTorch Module with an ``act``
             method, a ``pi`` module, a ``q1`` module, and a ``q2`` module.
-            The ``act`` method and ``pi`` module should accept batches of 
-            observations as inputs, and ``q1`` and ``q2`` should accept a batch 
-            of observations and a batch of actions as inputs. When called, 
+            The ``act`` method and ``pi`` module should accept batches of
+            observations as inputs, and ``q1`` and ``q2`` should accept a batch
+            of observations and a batch of actions as inputs. When called,
             these should return:
 
             ===========  ================  ======================================
             Call         Output Shape      Description
             ===========  ================  ======================================
-            ``act``      (batch, act_dim)  | Numpy array of actions for each 
+            ``act``      (batch, act_dim)  | Numpy array of actions for each
                                            | observation.
             ``pi``       (batch, act_dim)  | Tensor containing actions from policy
                                            | given observations.
@@ -113,18 +146,18 @@ def td3_ow(env_name, partially_observable=False, observation_window_size=5,
                                            | of Q* for the provided observations
                                            | and actions. (Critical: make sure to
                                            | flatten this!)
-            ``q2``       (batch,)          | Tensor containing the other current 
+            ``q2``       (batch,)          | Tensor containing the other current
                                            | estimate of Q* for the provided observations
                                            | and actions. (Critical: make sure to
                                            | flatten this!)
             ===========  ================  ======================================
 
-        ac_kwargs (dict): Any kwargs appropriate for the ActorCritic object 
+        ac_kwargs (dict): Any kwargs appropriate for the ActorCritic object
             you provided to TD3.
 
         seed (int): Seed for random number generators.
 
-        steps_per_epoch (int): Number of steps of interaction (state-action pairs) 
+        steps_per_epoch (int): Number of steps of interaction (state-action pairs)
             for the agent and the environment in each epoch.
 
         epochs (int): Number of epochs to run and train agent.
@@ -133,14 +166,14 @@ def td3_ow(env_name, partially_observable=False, observation_window_size=5,
 
         gamma (float): Discount factor. (Always between 0 and 1.)
 
-        polyak (float): Interpolation factor in polyak averaging for target 
-            networks. Target networks are updated towards main networks 
+        polyak (float): Interpolation factor in polyak averaging for target
+            networks. Target networks are updated towards main networks
             according to:
 
-            .. math:: \\theta_{\\text{targ}} \\leftarrow 
+            .. math:: \\theta_{\\text{targ}} \\leftarrow
                 \\rho \\theta_{\\text{targ}} + (1-\\rho) \\theta
 
-            where :math:`\\rho` is polyak. (Always between 0 and 1, usually 
+            where :math:`\\rho` is polyak. (Always between 0 and 1, usually
             close to 1.)
 
         pi_lr (float): Learning rate for policy.
@@ -157,20 +190,20 @@ def td3_ow(env_name, partially_observable=False, observation_window_size=5,
             is full enough for useful updates.
 
         update_every (int): Number of env interactions that should elapse
-            between gradient descent updates. Note: Regardless of how long 
-            you wait between updates, the ratio of env steps to gradient steps 
+            between gradient descent updates. Note: Regardless of how long
+            you wait between updates, the ratio of env steps to gradient steps
             is locked to 1.
 
-        act_noise (float): Stddev for Gaussian exploration noise added to 
+        act_noise (float): Stddev for Gaussian exploration noise added to
             policy at training time. (At test time, no noise is added.)
 
-        target_noise (float): Stddev for smoothing noise added to target 
+        target_noise (float): Stddev for smoothing noise added to target
             policy.
 
-        noise_clip (float): Limit for absolute value of target policy 
+        noise_clip (float): Limit for absolute value of target policy
             smoothing noise.
 
-        policy_delay (int): Policy will only be updated once every 
+        policy_delay (int): Policy will only be updated once every
             policy_delay times for each update of the Q-networks.
 
         num_test_episodes (int): Number of episodes to test the deterministic
@@ -201,15 +234,16 @@ def td3_ow(env_name, partially_observable=False, observation_window_size=5,
 
     # Action limit for clamping: critically, assumes all dimensions share the same bound!
     act_limit = env.action_space.high[0]
-    
+
     # Create actor-critic module and target networks
-    ac = actor_critic(env.observation_space, observation_window_size, env.action_space, **ac_kwargs)
+    ac = actor_critic(env.observation_space, observation_window_size, add_past_action,
+                      env.action_space, **ac_kwargs)
     ac_targ = deepcopy(ac)
 
     # Freeze target networks with respect to optimizers (only update via polyak averaging)
     for p in ac_targ.parameters():
         p.requires_grad = False
-        
+
     # List of parameters for both Q-networks (save this for convenience)
     q_params = itertools.chain(ac.q1.parameters(), ac.q2.parameters())
 
@@ -218,14 +252,14 @@ def td3_ow(env_name, partially_observable=False, observation_window_size=5,
 
     # Count variables (protip: try to get a feel for how different size networks behave!)
     var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.q1, ac.q2])
-    logger.log('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n'%var_counts)
+    logger.log('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n' % var_counts)
 
     # Set up function for computing TD3 Q-losses
     def compute_loss_q(data):
         o, a, r, o2, d = data['obs'], data['act'], data['rew'], data['obs2'], data['done']
 
-        q1 = ac.q1(o,a)
-        q2 = ac.q2(o,a)
+        q1 = ac.q1(o, a)
+        q2 = ac.q2(o, a)
 
         # Bellman backup for Q functions
         with torch.no_grad():
@@ -244,8 +278,8 @@ def td3_ow(env_name, partially_observable=False, observation_window_size=5,
             backup = r + gamma * (1 - d) * q_pi_targ
 
         # MSE loss against Bellman backup
-        loss_q1 = ((q1 - backup)**2).mean()
-        loss_q2 = ((q2 - backup)**2).mean()
+        loss_q1 = ((q1 - backup) ** 2).mean()
+        loss_q2 = ((q2 - backup) ** 2).mean()
         loss_q = loss_q1 + loss_q2
 
         # Useful info for logging
@@ -280,7 +314,7 @@ def td3_ow(env_name, partially_observable=False, observation_window_size=5,
         # Possibly update pi and target networks
         if timer % policy_delay == 0:
 
-            # Freeze Q-networks so you don't waste computational effort 
+            # Freeze Q-networks so you don't waste computational effort
             # computing gradients for them during the policy learning step.
             for p in q_params:
                 p.requires_grad = False
@@ -314,13 +348,21 @@ def td3_ow(env_name, partially_observable=False, observation_window_size=5,
     def test_agent():
         for j in range(num_test_episodes):
             o, d, ep_ret, ep_len = test_env.reset(), False, 0, 0
-            ow_o = np.zeros([int(observation_window_size*obs_dim)])
-            ow_o[-obs_dim:] = o
-            while not(d or (ep_len == max_ep_len)):
+            if add_past_action:
+                ow_o = np.zeros([int((observation_window_size - 1) * (obs_dim + act_dim) + obs_dim)])
+                ow_o[-obs_dim:] = o
+            else:
+                ow_o = np.zeros([int(observation_window_size * obs_dim)])
+                ow_o[-obs_dim:] = o
+            while not (d or (ep_len == max_ep_len)):
                 # Take deterministic actions at test time (noise_scale=0)
                 o, r, d, _ = test_env.step(get_action(ow_o, 0))
-                ow_o[:-obs_dim] = ow_o[obs_dim:]
-                ow_o[-obs_dim:] = o
+                if add_past_action:
+                    ow_o[:-(obs_dim + act_dim)] = ow_o[(obs_dim + act_dim):]
+                    ow_o[-(obs_dim + act_dim):] = np.concatenate((a, o))
+                else:
+                    ow_o[:-obs_dim] = ow_o[obs_dim:]
+                    ow_o[-obs_dim:] = o
                 ep_ret += r
                 ep_len += 1
             logger.store(TestEpRet=ep_ret, TestEpLen=ep_len)
@@ -329,16 +371,20 @@ def td3_ow(env_name, partially_observable=False, observation_window_size=5,
     total_steps = steps_per_epoch * epochs
     start_time = time.time()
     o, ep_ret, ep_len = env.reset(), 0, 0
-    
-    ow_o = np.zeros([int(observation_window_size*obs_dim)])
-    ow_o[-obs_dim:] = o
-    
+
+    if add_past_action:
+        ow_o = np.zeros([int((observation_window_size - 1) * (obs_dim + act_dim) + obs_dim)])
+        ow_o[-obs_dim:] = o
+    else:
+        ow_o = np.zeros([int(observation_window_size * obs_dim)])
+        ow_o[-obs_dim:] = o
+
     # Main loop: collect experience in env and update/log each epoch
     for t in range(total_steps):
-        
+
         # Until start_steps have elapsed, randomly sample actions
-        # from a uniform distribution for better exploration. Afterwards, 
-        # use the learned policy (with some noise, via act_noise). 
+        # from a uniform distribution for better exploration. Afterwards,
+        # use the learned policy (with some noise, via act_noise).
         if t > start_steps:
             a = get_action(ow_o, act_noise)
         else:
@@ -352,34 +398,43 @@ def td3_ow(env_name, partially_observable=False, observation_window_size=5,
         # Ignore the "done" signal if it comes from hitting the time
         # horizon (that is, when it's an artificial terminal signal
         # that isn't based on the agent's state)
-        d = False if ep_len==max_ep_len else d
+        d = False if ep_len == max_ep_len else d
 
         # Store experience to replay buffer
         replay_buffer.store(o, a, r, o2, d)
 
-        # Super critical, easy to overlook step: make sure to update 
+        # Super critical, easy to overlook step: make sure to update
         # most recent observation!
         o = o2
-        ow_o[:-obs_dim] = ow_o[obs_dim:]
-        ow_o[-obs_dim:] = o
+
+        if add_past_action:
+            ow_o[:-(obs_dim + act_dim)] = ow_o[(obs_dim + act_dim):]
+            ow_o[-(obs_dim + act_dim):] = np.concatenate((a, o))
+        else:
+            ow_o[:-obs_dim] = ow_o[obs_dim:]
+            ow_o[-obs_dim:] = o
 
         # End of trajectory handling
         if d or (ep_len == max_ep_len):
             logger.store(EpRet=ep_ret, EpLen=ep_len)
             o, ep_ret, ep_len = env.reset(), 0, 0
-            ow_o = np.zeros([int(observation_window_size*obs_dim)])
-            ow_o[-obs_dim:] = o
+            if add_past_action:
+                ow_o = np.zeros([int((observation_window_size - 1) * (obs_dim + act_dim) + obs_dim)])
+                ow_o[-obs_dim:] = o
+            else:
+                ow_o = np.zeros([int(observation_window_size * obs_dim)])
+                ow_o[-obs_dim:] = o
 
         # Update handling
         if t >= update_after and t % update_every == 0:
             for j in range(update_every):
                 # batch = replay_buffer.sample_batch(batch_size)
-                batch = replay_buffer.sample_batch_ow(batch_size, observation_window_size)
+                batch = replay_buffer.sample_batch_ow(batch_size, observation_window_size, add_past_action)
                 update(data=batch, timer=j)
 
         # End of epoch handling
-        if (t+1) % steps_per_epoch == 0:
-            epoch = (t+1) // steps_per_epoch
+        if (t + 1) % steps_per_epoch == 0:
+            epoch = (t + 1) // steps_per_epoch
 
             # Save model
             if (epoch % save_freq == 0) or (epoch == epochs):
@@ -399,7 +454,7 @@ def td3_ow(env_name, partially_observable=False, observation_window_size=5,
             logger.log_tabular('Q2Vals', with_min_and_max=True)
             logger.log_tabular('LossPi', average_only=True)
             logger.log_tabular('LossQ', average_only=True)
-            logger.log_tabular('Time', time.time()-start_time)
+            logger.log_tabular('Time', time.time() - start_time)
             logger.dump_tabular()
 
 
@@ -414,18 +469,19 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
-        
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
     parser.add_argument('--observation_window_size', type=int, default=5)
+    parser.add_argument('--add_past_action', type=str2bool, nargs='?', const=True, default=False, help='')
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--exp_name', type=str, default='td3_ow')
     parser.add_argument("--data_dir", type=str, default='spinup_data_td3_ow')
     args = parser.parse_args()
@@ -440,6 +496,7 @@ if __name__ == '__main__':
 
     td3_ow(env_name=args.env, partially_observable=args.partially_observable,
            observation_window_size=args.observation_window_size,
+           add_past_action=args.add_past_action,
            actor_critic=core.MLPActorCritic,
            ac_kwargs=dict(hidden_sizes=[args.hid]*args.l),
            gamma=args.gamma, seed=args.seed, epochs=args.epochs,
