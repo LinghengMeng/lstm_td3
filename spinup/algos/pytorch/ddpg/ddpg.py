@@ -43,6 +43,7 @@ class ReplayBuffer:
 
 
 def ddpg(env_name, partially_observable=False,
+         pomdp_type = 'remove_velocity', flicker_prob=0.2,
          actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
          steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99, 
          polyak=0.995, pi_lr=1e-3, q_lr=1e-3, batch_size=100, start_steps=10000, 
@@ -142,7 +143,7 @@ def ddpg(env_name, partially_observable=False,
 
     # Wrapper environment if using POMDP
     if partially_observable:
-        env, test_env = POMDPWrapper(env_name), POMDPWrapper(env_name)
+        env, test_env = POMDPWrapper(env_name, pomdp_type, flicker_prob), POMDPWrapper(env_name, pomdp_type, flicker_prob)
     else:
         env, test_env = gym.make(env_name), gym.make(env_name)
     obs_dim = env.observation_space.shape[0]
@@ -332,6 +333,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
+    parser.add_argument('--pomdp_type', choices=['remove_velocity', 'flickering'], default='remove_velocity')
+    parser.add_argument('--flicker_prob', type=float, default=0.2)
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
@@ -349,6 +352,8 @@ if __name__ == '__main__':
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
 
     ddpg(env_name=args.env, partially_observable=args.partially_observable,
+         pomdp_type=args.pomdp_type,
+         flicker_prob=args.flicker_prob,
          actor_critic=core.MLPActorCritic,
          ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), 
          gamma=args.gamma, seed=args.seed, epochs=args.epochs,

@@ -109,6 +109,7 @@ class ReplayBuffer:
 
 
 def td3_ow(env_name, partially_observable=False,
+           pomdp_type = 'remove_velocity', flicker_prob=0.2,
            observation_window_size=5, add_past_action=False,
            actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
            steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
@@ -226,7 +227,7 @@ def td3_ow(env_name, partially_observable=False,
 
     # Wrapper environment if using POMDP
     if partially_observable:
-        env, test_env = POMDPWrapper(env_name), POMDPWrapper(env_name)
+        env, test_env = POMDPWrapper(env_name, pomdp_type, flicker_prob), POMDPWrapper(env_name, pomdp_type, flicker_prob)
     else:
         env, test_env = gym.make(env_name), gym.make(env_name)
     obs_dim = env.observation_space.shape[0]
@@ -475,6 +476,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
+    parser.add_argument('--pomdp_type', choices=['remove_velocity', 'flickering'], default='remove_velocity')
+    parser.add_argument('--flicker_prob', type=float, default=0.2)
     parser.add_argument('--observation_window_size', type=int, default=5)
     parser.add_argument('--add_past_action', type=str2bool, nargs='?', const=True, default=False, help='')
     parser.add_argument('--hid', type=int, default=256)
@@ -495,6 +498,8 @@ if __name__ == '__main__':
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
 
     td3_ow(env_name=args.env, partially_observable=args.partially_observable,
+           pomdp_type=args.pomdp_type,
+           flicker_prob=args.flicker_prob,
            observation_window_size=args.observation_window_size,
            add_past_action=args.add_past_action,
            actor_critic=core.MLPActorCritic,

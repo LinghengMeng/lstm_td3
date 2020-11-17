@@ -137,11 +137,12 @@ class MLPCritic(nn.Module):
                  mem_pre_lstm_hid_sizes=(128,),
                  mem_lstm_hid_sizes=(128,),
                  cur_feature_hid_sizes=(128,),
-                 post_comb_hid_sizes=(128,), mem_gate=True):
+                 post_comb_hid_sizes=(128,), mem_gate=True, hist_with_past_act=False):
         super(MLPCritic, self).__init__()
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.mem_gate = mem_gate
+        self.hist_with_past_act = hist_with_past_act
         #
         self.mem_pre_lstm_layers = nn.ModuleList()
         self.mem_lstm_layers = nn.ModuleList()
@@ -152,7 +153,10 @@ class MLPCritic(nn.Module):
         self.post_combined_layers = nn.ModuleList()
         # Memory
         #    Pre-LSTM
-        mem_pre_lstm_layer_size = [obs_dim + act_dim] + list(mem_pre_lstm_hid_sizes)
+        if self.hist_with_past_act:
+            mem_pre_lstm_layer_size = [obs_dim + act_dim] + list(mem_pre_lstm_hid_sizes)
+        else:
+            mem_pre_lstm_layer_size = [obs_dim] + list(mem_pre_lstm_hid_sizes)
         for h in range(len(mem_pre_lstm_layer_size) - 1):
             self.mem_pre_lstm_layers += [nn.Linear(mem_pre_lstm_layer_size[h],
                                                    mem_pre_lstm_layer_size[h + 1]),
@@ -188,9 +192,10 @@ class MLPCritic(nn.Module):
         #
         tmp_hist_seg_len = deepcopy(hist_seg_len)
         tmp_hist_seg_len[hist_seg_len == 0] = 1
-
-        x = torch.cat([hist_obs, hist_act], dim=-1)
-
+        if self.hist_with_past_act:
+            x = torch.cat([hist_obs, hist_act], dim=-1)
+        else:
+            x = hist_obs
         # Memory
         #    Pre-LSTM
         for layer in self.mem_pre_lstm_layers:
@@ -228,12 +233,13 @@ class MLPActor(nn.Module):
                  mem_pre_lstm_hid_sizes=(128,),
                  mem_lstm_hid_sizes=(128,),
                  cur_feature_hid_sizes=(128,),
-                 post_comb_hid_sizes=(128,), mem_gate=True):
+                 post_comb_hid_sizes=(128,), mem_gate=True, hist_with_past_act=False):
         super(MLPActor, self).__init__()
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.act_limit = act_limit
         self.mem_gate = mem_gate
+        self.hist_with_past_act = hist_with_past_act
         #
         self.mem_pre_lstm_layers = nn.ModuleList()
         self.mem_lstm_layers = nn.ModuleList()
@@ -245,7 +251,10 @@ class MLPActor(nn.Module):
 
         # Memory
         #    Pre-LSTM
-        mem_pre_lstm_layer_size = [obs_dim + act_dim] + list(mem_pre_lstm_hid_sizes)
+        if self.hist_with_past_act:
+            mem_pre_lstm_layer_size = [obs_dim + act_dim] + list(mem_pre_lstm_hid_sizes)
+        else:
+            mem_pre_lstm_layer_size = [obs_dim] + list(mem_pre_lstm_hid_sizes)
         for h in range(len(mem_pre_lstm_layer_size) - 1):
             self.mem_pre_lstm_layers += [nn.Linear(mem_pre_lstm_layer_size[h],
                                                    mem_pre_lstm_layer_size[h + 1]),
@@ -279,9 +288,10 @@ class MLPActor(nn.Module):
         #
         tmp_hist_seg_len = deepcopy(hist_seg_len)
         tmp_hist_seg_len[hist_seg_len == 0] = 1
-
-        x = torch.cat([hist_obs, hist_act], dim=-1)
-
+        if self.hist_with_past_act:
+            x = torch.cat([hist_obs, hist_act], dim=-1)
+        else:
+            x = hist_obs
         # Memory
         #    Pre-LSTM
         for layer in self.mem_pre_lstm_layers:
@@ -319,27 +329,32 @@ class MLPActorCritic(nn.Module):
                  critic_mem_pre_lstm_hid_sizes=(128,),
                  critic_mem_lstm_hid_sizes=(128,),
                  critic_cur_feature_hid_sizes=(128,),
-                 critic_post_comb_hid_sizes=(128,), critic_mem_gate=True,
+                 critic_post_comb_hid_sizes=(128,),
+                 critic_mem_gate=True, critic_hist_with_past_act=False,
                  actor_mem_pre_lstm_hid_sizes=(128,),
                  actor_mem_lstm_hid_sizes=(128,),
                  actor_cur_feature_hid_sizes=(128,),
-                 actor_post_comb_hid_sizes=(128,), actor_mem_gate=True):
+                 actor_post_comb_hid_sizes=(128,),
+                 actor_mem_gate=True, actor_hist_with_past_act=False):
         super(MLPActorCritic, self).__init__()
         self.q1 = MLPCritic(obs_dim, act_dim,
                             mem_pre_lstm_hid_sizes=critic_mem_pre_lstm_hid_sizes,
                             mem_lstm_hid_sizes=critic_mem_lstm_hid_sizes,
                             cur_feature_hid_sizes=critic_cur_feature_hid_sizes,
-                            post_comb_hid_sizes=critic_post_comb_hid_sizes, mem_gate=critic_mem_gate)
+                            post_comb_hid_sizes=critic_post_comb_hid_sizes,
+                            mem_gate=critic_mem_gate, hist_with_past_act=critic_hist_with_past_act)
         self.q2 = MLPCritic(obs_dim, act_dim,
                             mem_pre_lstm_hid_sizes=critic_mem_pre_lstm_hid_sizes,
                             mem_lstm_hid_sizes=critic_mem_lstm_hid_sizes,
                             cur_feature_hid_sizes=critic_cur_feature_hid_sizes,
-                            post_comb_hid_sizes=critic_post_comb_hid_sizes, mem_gate=critic_mem_gate)
+                            post_comb_hid_sizes=critic_post_comb_hid_sizes,
+                            mem_gate=critic_mem_gate, hist_with_past_act=critic_hist_with_past_act)
         self.pi = MLPActor(obs_dim, act_dim, act_limit,
                            mem_pre_lstm_hid_sizes=actor_mem_pre_lstm_hid_sizes,
                            mem_lstm_hid_sizes=actor_mem_lstm_hid_sizes,
                            cur_feature_hid_sizes=actor_cur_feature_hid_sizes,
-                           post_comb_hid_sizes=actor_post_comb_hid_sizes, mem_gate=actor_mem_gate)
+                           post_comb_hid_sizes=actor_post_comb_hid_sizes,
+                           mem_gate=actor_mem_gate, hist_with_past_act=actor_hist_with_past_act)
 
     def act(self, obs, hist_obs=None, hist_act=None, hist_seg_len=None):
         if (hist_obs is None) or (hist_act is None) or (hist_seg_len is None):
@@ -362,14 +377,17 @@ def lstm_td3(env_name, seed=0,
              batch_size=100,
              max_hist_len=100,
              partially_observable=False,
+             pomdp_type = 'remove_velocity', flicker_prob=0.2,
              critic_mem_pre_lstm_hid_sizes=(128,),
              critic_mem_lstm_hid_sizes=(128,),
              critic_cur_feature_hid_sizes=(128,),
-             critic_post_comb_hid_sizes=(128,), critic_mem_gate=False,
+             critic_post_comb_hid_sizes=(128,),
+             critic_mem_gate=False, critic_hist_with_past_act=False,
              actor_mem_pre_lstm_hid_sizes=(128,),
              actor_mem_lstm_hid_sizes=(128,),
              actor_cur_feature_hid_sizes=(128,),
-             actor_post_comb_hid_sizes=(128,), actor_mem_gate=False,
+             actor_post_comb_hid_sizes=(128,),
+             actor_mem_gate=False, actor_hist_with_past_act=False,
              logger_kwargs=dict(), save_freq=1):
     """
     Twin Delayed Deep Deterministic Policy Gradient (TD3)
@@ -479,7 +497,7 @@ def lstm_td3(env_name, seed=0,
 
     # Wrapper environment if using POMDP
     if partially_observable:
-        env, test_env = POMDPWrapper(env_name), POMDPWrapper(env_name)
+        env, test_env = POMDPWrapper(env_name, pomdp_type, flicker_prob), POMDPWrapper(env_name, pomdp_type, flicker_prob)
     else:
         env, test_env = gym.make(env_name), gym.make(env_name)
     obs_dim = env.observation_space.shape[0]
@@ -495,11 +513,13 @@ def lstm_td3(env_name, seed=0,
                         critic_cur_feature_hid_sizes=critic_cur_feature_hid_sizes,
                         critic_post_comb_hid_sizes=critic_post_comb_hid_sizes,
                         critic_mem_gate=critic_mem_gate,
+                        critic_hist_with_past_act=critic_hist_with_past_act,
                         actor_mem_pre_lstm_hid_sizes=actor_mem_pre_lstm_hid_sizes,
                         actor_mem_lstm_hid_sizes=actor_mem_lstm_hid_sizes,
                         actor_cur_feature_hid_sizes=actor_cur_feature_hid_sizes,
                         actor_post_comb_hid_sizes=actor_post_comb_hid_sizes,
-                        actor_mem_gate=actor_mem_gate)
+                        actor_mem_gate=actor_mem_gate,
+                        actor_hist_with_past_act=actor_hist_with_past_act)
     ac_targ = deepcopy(ac)
     ac.to(DEVICE)
     ac_targ.to(DEVICE)
@@ -669,10 +689,10 @@ def lstm_td3(env_name, seed=0,
     # Main loop: collect experience in env and update/log each epoch
     start_time = time.time()
     for t in range(total_steps):
-        if t % 200 == 0:
-            end_time = time.time()
-            print("t={}, {}s".format(t, end_time - start_time))
-            start_time = end_time
+        # if t % 200 == 0:
+        #     end_time = time.time()
+        #     print("t={}, {}s".format(t, end_time - start_time))
+        #     start_time = end_time
         # Until start_steps have elapsed, randomly sample actions
         # from a uniform distribution for better exploration. Afterwards,
         # use the learned policy (with some noise, via act_noise).
@@ -777,19 +797,23 @@ if __name__ == '__main__':
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--max_hist_len', type=int, default=10)
     parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
+    parser.add_argument('--pomdp_type', choices=['remove_velocity', 'flickering'], default='remove_velocity')
+    parser.add_argument('--flicker_prob', type=float, default=0.2)
     parser.add_argument('--critic_mem_pre_lstm_hid_sizes', type=tuple, default=(128,))
     parser.add_argument('--critic_mem_lstm_hid_sizes', type=tuple, default=(128,))
-    parser.add_argument('--critic_cur_feature_hid_sizes', type=tuple, default=(128,))
+    parser.add_argument('--critic_cur_feature_hid_sizes', type=tuple, default=(128,128))
     parser.add_argument('--critic_post_comb_hid_sizes', type=tuple, default=(128,))
-    parser.add_argument('--critic_mem_gate', type=bool, default=False)
+    parser.add_argument('--critic_mem_gate', type=str2bool, nargs='?', const=True, default=False)
+    parser.add_argument('--critic_hist_with_past_act', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--actor_mem_pre_lstm_hid_sizes', type=tuple, default=(128,))
     parser.add_argument('--actor_mem_lstm_hid_sizes', type=tuple, default=(128,))
-    parser.add_argument('--actor_cur_feature_hid_sizes', type=tuple, default=(128,))
+    parser.add_argument('--actor_cur_feature_hid_sizes', type=tuple, default=(128,128))
     parser.add_argument('--actor_post_comb_hid_sizes', type=tuple, default=(128,))
-    parser.add_argument('--actor_mem_gate', type=bool, default=False)
+    parser.add_argument('--actor_mem_gate', type=str2bool, nargs='?', const=True, default=False)
+    parser.add_argument('--actor_hist_with_past_act', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--exp_name', type=str, default='lstm_td3')
     parser.add_argument("--data_dir", type=str, default='spinup_data_lstm')
     args = parser.parse_args()
@@ -805,14 +829,18 @@ if __name__ == '__main__':
              gamma=args.gamma, seed=args.seed, epochs=args.epochs,
              max_hist_len=args.max_hist_len,
              partially_observable=args.partially_observable,
+             pomdp_type=args.pomdp_type,
+             flicker_prob=args.flicker_prob,
              critic_mem_pre_lstm_hid_sizes=args.critic_mem_pre_lstm_hid_sizes,
              critic_mem_lstm_hid_sizes=args.critic_mem_lstm_hid_sizes,
              critic_cur_feature_hid_sizes=args.critic_cur_feature_hid_sizes,
              critic_post_comb_hid_sizes=args.critic_post_comb_hid_sizes,
              critic_mem_gate=args.critic_mem_gate,
+             critic_hist_with_past_act=args.critic_hist_with_past_act,
              actor_mem_pre_lstm_hid_sizes=args.actor_mem_pre_lstm_hid_sizes,
              actor_mem_lstm_hid_sizes=args.actor_mem_lstm_hid_sizes,
              actor_cur_feature_hid_sizes=args.actor_cur_feature_hid_sizes,
              actor_post_comb_hid_sizes=args.actor_post_comb_hid_sizes,
              actor_mem_gate=args.actor_mem_gate,
+             actor_hist_with_past_act=args.actor_hist_with_past_act,
              logger_kwargs=logger_kwargs)

@@ -88,6 +88,7 @@ class PPOBuffer:
 
 
 def ppo(env_name, partially_observable=False,
+        pomdp_type = 'remove_velocity', flicker_prob=0.2,
         actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
         vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, lam=0.97, max_ep_len=1000,
@@ -212,7 +213,7 @@ def ppo(env_name, partially_observable=False,
     # Instantiate environment
     # Wrapper environment if using POMDP
     if partially_observable:
-        env = POMDPWrapper(env_name)
+        env = POMDPWrapper(env_name, pomdp_type, flicker_prob)
     else:
         env = gym.make(env_name)
     obs_dim = env.observation_space.shape[0]
@@ -380,6 +381,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
+    parser.add_argument('--pomdp_type', choices=['remove_velocity', 'flickering'], default='remove_velocity')
+    parser.add_argument('--flicker_prob', type=float, default=0.2)
     parser.add_argument('--hid', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
@@ -402,6 +405,8 @@ if __name__ == '__main__':
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
 
     ppo(env_name=args.env, partially_observable=args.partially_observable,
+        pomdp_type=args.pomdp_type,
+        flicker_prob=args.flicker_prob,
         actor_critic=core.MLPActorCritic,
         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), gamma=args.gamma, 
         seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,
