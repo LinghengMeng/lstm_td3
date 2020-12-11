@@ -3,7 +3,8 @@ import gym
 
 
 class POMDPWrapper(gym.ObservationWrapper):
-    def __init__(self, env_name, pomdp_type='remove_velocity', flicker_prob=0.2):
+    def __init__(self, env_name, pomdp_type='remove_velocity',
+                 flicker_prob=0.2, random_noise_sigma=0.1, random_sensor_missing_prob=0.1):
         """
 
         :param env_name:
@@ -11,11 +12,14 @@ class POMDPWrapper(gym.ObservationWrapper):
             1. remove_velocity: remove velocity related observation
             2. flickering: obscure the entire observation with a certain probability at each time step with the
                   probability flicker_prob.
-            3.
+            3. random_noise: each sensor in an observation is disturbed by a random noise Normal ~ (0, sigma).
+            4. random_sensor_missing: each sensor in an observation will miss with a relatively low probability sensor_miss_prob
         """
         super().__init__(gym.make(env_name))
         self.pomdp_type = pomdp_type
         self.flicker_prob = flicker_prob
+        self.random_noise_sigma = random_noise_sigma
+        self.random_sensor_missing_prob = random_sensor_missing_prob
 
         if pomdp_type == 'remove_velocity':
             # Remove velocity info
@@ -92,8 +96,13 @@ class POMDPWrapper(gym.ObservationWrapper):
             self.observation_space = gym.spaces.Box(obs_low, obs_high)
         elif pomdp_type == 'flickering':
             pass
+        elif self.pomdp_type == 'random_noise':
+            pass
+        elif self.pomdp_type == 'random_sensor_missing':
+            pass
         else:
-            raise ValueError('pomdp_type was not specified!')
+            raise ValueError("pomdp_type was not specified! Please choose one of in "
+                             "['remove_velocity', 'flickering', 'random_noise', 'random_sensor_missing']")
 
     def observation(self, obs):
         if self.pomdp_type == 'remove_velocity':
@@ -103,3 +112,19 @@ class POMDPWrapper(gym.ObservationWrapper):
                 return np.zeros(obs.shape)
             else:
                 return obs.flatten()
+        elif self.pomdp_type == 'random_noise':
+            return (obs + np.random.normal(0, self.random_noise_sigma, obs.shape)).flatten()
+        elif self.pomdp_type == 'random_sensor_missing':
+            obs[np.random.rand(len(obs)) <= self.random_sensor_missing_prob] = 0
+            return obs.flatten()
+        else:
+            raise ValueError("pomdp_type was not in ['remove_velocity', 'flickering', 'random_noise', 'random_sensor_missing']!")
+
+
+if __name__ == '__main__':
+    import pybulletgym
+    import gym
+    env = POMDPWrapper("AntPyBulletEnv-v0", 'random_noise')
+    env.reset()
+    print(env.action_space)
+    print(env.observation_space)
