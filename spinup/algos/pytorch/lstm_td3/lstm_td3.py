@@ -377,7 +377,8 @@ def lstm_td3(env_name, seed=0,
              batch_size=100,
              max_hist_len=100,
              partially_observable=False,
-             pomdp_type = 'remove_velocity', flicker_prob=0.2,
+             pomdp_type = 'remove_velocity',
+             flicker_prob=0.2, random_noise_sigma=0.1, random_sensor_missing_prob=0.1,
              critic_mem_pre_lstm_hid_sizes=(128,),
              critic_mem_lstm_hid_sizes=(128,),
              critic_cur_feature_hid_sizes=(128,),
@@ -497,7 +498,8 @@ def lstm_td3(env_name, seed=0,
 
     # Wrapper environment if using POMDP
     if partially_observable:
-        env, test_env = POMDPWrapper(env_name, pomdp_type, flicker_prob), POMDPWrapper(env_name, pomdp_type, flicker_prob)
+        env = POMDPWrapper(env_name, pomdp_type, flicker_prob, random_noise_sigma, random_sensor_missing_prob)
+        test_env = POMDPWrapper(env_name, pomdp_type, flicker_prob, random_noise_sigma, random_sensor_missing_prob)
     else:
         env, test_env = gym.make(env_name), gym.make(env_name)
     obs_dim = env.observation_space.shape[0]
@@ -798,10 +800,14 @@ if __name__ == '__main__':
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--max_hist_len', type=int, default=10)
+    parser.add_argument('--max_hist_len', type=int, default=5)
     parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
-    parser.add_argument('--pomdp_type', choices=['remove_velocity', 'flickering'], default='remove_velocity')
+    parser.add_argument('--pomdp_type',
+                        choices=['remove_velocity', 'flickering', 'random_noise', 'random_sensor_missing'],
+                        default='remove_velocity')
     parser.add_argument('--flicker_prob', type=float, default=0.2)
+    parser.add_argument('--random_noise_sigma', type=float, default=0.1)
+    parser.add_argument('--random_sensor_missing_prob', type=float, default=0.1)
     parser.add_argument('--critic_mem_pre_lstm_hid_sizes', type=tuple, default=(128,))
     parser.add_argument('--critic_mem_lstm_hid_sizes', type=tuple, default=(128,))
     parser.add_argument('--critic_cur_feature_hid_sizes', type=tuple, default=(128,128))
@@ -831,6 +837,8 @@ if __name__ == '__main__':
              partially_observable=args.partially_observable,
              pomdp_type=args.pomdp_type,
              flicker_prob=args.flicker_prob,
+             random_noise_sigma=args.random_noise_sigma,
+             random_sensor_missing_prob=args.random_sensor_missing_prob,
              critic_mem_pre_lstm_hid_sizes=args.critic_mem_pre_lstm_hid_sizes,
              critic_mem_lstm_hid_sizes=args.critic_mem_lstm_hid_sizes,
              critic_cur_feature_hid_sizes=args.critic_cur_feature_hid_sizes,
