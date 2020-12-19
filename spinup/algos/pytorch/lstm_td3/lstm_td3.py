@@ -885,6 +885,9 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
+def list2tuple(v):
+    import pdb; pdb.set_trace()
+    return tuple(v)
 
 if __name__ == '__main__':
     import argparse
@@ -904,20 +907,20 @@ if __name__ == '__main__':
     parser.add_argument('--flicker_prob', type=float, default=0.2)
     parser.add_argument('--random_noise_sigma', type=float, default=0.1)
     parser.add_argument('--random_sensor_missing_prob', type=float, default=0.1)
-    parser.add_argument('--critic_mem_pre_lstm_hid_sizes', type=tuple, default=(128,))
-    parser.add_argument('--critic_mem_lstm_hid_sizes', type=tuple, default=(128,))
-    parser.add_argument('--critic_mem_after_lstm_hid_size', type=tuple, default=(128,))
-    parser.add_argument('--critic_cur_feature_hid_sizes', type=tuple, default=(128,128))
-    parser.add_argument('--critic_post_comb_hid_sizes', type=tuple, default=(128,))
+    parser.add_argument('--critic_mem_pre_lstm_hid_sizes', type=int, nargs="+", default=[128])
+    parser.add_argument('--critic_mem_lstm_hid_sizes', type=int, nargs="+", default=[128])
+    parser.add_argument('--critic_mem_after_lstm_hid_size', type=int, nargs="+", default=[])
+    parser.add_argument('--critic_cur_feature_hid_sizes', type=int, nargs="+", default=[128, 128])
+    parser.add_argument('--critic_post_comb_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--critic_mem_gate', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--critic_mem_gate_before_current_feature_extraction', type=str2bool, nargs='?',
                         const=True, default=False)
     parser.add_argument('--critic_hist_with_past_act', type=str2bool, nargs='?', const=True, default=False)
-    parser.add_argument('--actor_mem_pre_lstm_hid_sizes', type=tuple, default=(128,))
-    parser.add_argument('--actor_mem_lstm_hid_sizes', type=tuple, default=(128,))
-    parser.add_argument('--actor_mem_after_lstm_hid_size', type=tuple, default=(128,))
-    parser.add_argument('--actor_cur_feature_hid_sizes', type=tuple, default=(128,128))
-    parser.add_argument('--actor_post_comb_hid_sizes', type=tuple, default=(128,))
+    parser.add_argument('--actor_mem_pre_lstm_hid_sizes', type=int, nargs="+", default=[128])
+    parser.add_argument('--actor_mem_lstm_hid_sizes', type=int, nargs="+", default=[128])
+    parser.add_argument('--actor_mem_after_lstm_hid_size', type=int, nargs="+", default=[])
+    parser.add_argument('--actor_cur_feature_hid_sizes', type=int, nargs="+", default=[128, 128])
+    parser.add_argument('--actor_post_comb_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--actor_mem_gate', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--actor_mem_gate_before_current_feature_extraction', type=str2bool, nargs='?',
                         const=True, default=False)
@@ -941,19 +944,19 @@ if __name__ == '__main__':
              flicker_prob=args.flicker_prob,
              random_noise_sigma=args.random_noise_sigma,
              random_sensor_missing_prob=args.random_sensor_missing_prob,
-             critic_mem_pre_lstm_hid_sizes=args.critic_mem_pre_lstm_hid_sizes,
-             critic_mem_lstm_hid_sizes=args.critic_mem_lstm_hid_sizes,
-             critic_mem_after_lstm_hid_size=args.critic_mem_after_lstm_hid_size,
-             critic_cur_feature_hid_sizes=args.critic_cur_feature_hid_sizes,
-             critic_post_comb_hid_sizes=args.critic_post_comb_hid_sizes,
+             critic_mem_pre_lstm_hid_sizes=tuple(args.critic_mem_pre_lstm_hid_sizes),
+             critic_mem_lstm_hid_sizes=tuple(args.critic_mem_lstm_hid_sizes),
+             critic_mem_after_lstm_hid_size=tuple(args.critic_mem_after_lstm_hid_size),
+             critic_cur_feature_hid_sizes=tuple(args.critic_cur_feature_hid_sizes),
+             critic_post_comb_hid_sizes=tuple(args.critic_post_comb_hid_sizes),
              critic_mem_gate=args.critic_mem_gate,
              critic_mem_gate_before_current_feature_extraction=args.critic_mem_gate_before_current_feature_extraction,
              critic_hist_with_past_act=args.critic_hist_with_past_act,
-             actor_mem_pre_lstm_hid_sizes=args.actor_mem_pre_lstm_hid_sizes,
-             actor_mem_lstm_hid_sizes=args.actor_mem_lstm_hid_sizes,
-             actor_mem_after_lstm_hid_size=args.actor_mem_after_lstm_hid_size,
-             actor_cur_feature_hid_sizes=args.actor_cur_feature_hid_sizes,
-             actor_post_comb_hid_sizes=args.actor_post_comb_hid_sizes,
+             actor_mem_pre_lstm_hid_sizes=tuple(args.actor_mem_pre_lstm_hid_sizes),
+             actor_mem_lstm_hid_sizes=tuple(args.actor_mem_lstm_hid_sizes),
+             actor_mem_after_lstm_hid_size=tuple(args.actor_mem_after_lstm_hid_size),
+             actor_cur_feature_hid_sizes=tuple(args.actor_cur_feature_hid_sizes),
+             actor_post_comb_hid_sizes=tuple(args.actor_post_comb_hid_sizes),
              actor_mem_gate=args.actor_mem_gate,
              actor_mem_gate_before_current_feature_extraction=args.actor_mem_gate_before_current_feature_extraction,
              actor_hist_with_past_act=args.actor_hist_with_past_act,
