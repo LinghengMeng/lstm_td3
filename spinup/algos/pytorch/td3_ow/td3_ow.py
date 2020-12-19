@@ -479,7 +479,10 @@ if __name__ == '__main__':
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
     parser.add_argument('--pomdp_type',
-                        choices=['remove_velocity', 'flickering', 'random_noise', 'random_sensor_missing'],
+                        choices=['remove_velocity', 'flickering', 'random_noise', 'random_sensor_missing',
+                                 'remove_velocity_and_flickering', 'remove_velocity_and_random_noise',
+                                 'remove_velocity_and_random_sensor_missing', 'flickering_and_random_noise',
+                                 'random_noise_and_random_sensor_missing', 'random_sensor_missing_and_random_noise'],
                         default='remove_velocity')
     parser.add_argument('--flicker_prob', type=float, default=0.2)
     parser.add_argument('--random_noise_sigma', type=float, default=0.1)

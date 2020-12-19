@@ -136,6 +136,7 @@ class MLPCritic(nn.Module):
     def __init__(self, obs_dim, act_dim,
                  mem_pre_lstm_hid_sizes=(128,),
                  mem_lstm_hid_sizes=(128,),
+                 mem_after_lstm_hid_size=(128,),
                  cur_feature_hid_sizes=(128,),
                  post_comb_hid_sizes=(128,),
                  mem_gate=True,
@@ -150,6 +151,7 @@ class MLPCritic(nn.Module):
         #
         self.mem_pre_lstm_layers = nn.ModuleList()
         self.mem_lstm_layers = nn.ModuleList()
+        self.mem_after_lstm_layers = nn.ModuleList()
 
         self.mem_gate_layer = nn.ModuleList()
 
@@ -171,6 +173,13 @@ class MLPCritic(nn.Module):
             self.mem_lstm_layers += [
                 nn.LSTM(self.mem_lstm_layer_sizes[h], self.mem_lstm_layer_sizes[h + 1], batch_first=True)]
 
+        #   After-LSTM
+        self.mem_after_lstm_layer_size = [self.mem_lstm_layer_sizes[-1]] + list(mem_after_lstm_hid_size)
+        for h in range(len(self.mem_after_lstm_layer_size)-1):
+            self.mem_after_lstm_layers += [nn.Linear(self.mem_after_lstm_layer_size[h],
+                                                     self.mem_after_lstm_layer_size[h+1]),
+                                           nn.ReLU()]
+
         # Current Feature Extraction
         cur_feature_layer_size = [obs_dim + act_dim] + list(cur_feature_hid_sizes)
         for h in range(len(cur_feature_layer_size) - 1):
@@ -182,16 +191,18 @@ class MLPCritic(nn.Module):
             if self.mem_gate_before_current_feature_extraction:
                 # Put Memory Gate before feature extraction
                 self.mem_gate_layer += [
-                    nn.Linear(self.mem_lstm_layer_sizes[-1] + obs_dim + act_dim, self.mem_lstm_layer_sizes[-1]),
+                    nn.Linear(self.mem_after_lstm_layer_size[-1] + obs_dim + act_dim,
+                              self.self.mem_after_lstm_layer_size[-1]),
                     nn.Sigmoid()]
             else:
                 # Put Memory Gate after current feature extraction
                 self.mem_gate_layer += [
-                    nn.Linear(self.mem_lstm_layer_sizes[-1] + cur_feature_layer_size[-1], self.mem_lstm_layer_sizes[-1]),
+                    nn.Linear(self.mem_after_lstm_layer_size[-1] + cur_feature_layer_size[-1],
+                              self.self.mem_after_lstm_layer_size[-1]),
                     nn.Sigmoid()]
 
         # Post-Combination
-        post_combined_layer_size = [self.mem_lstm_layer_sizes[-1] + cur_feature_layer_size[-1]] + list(
+        post_combined_layer_size = [self.mem_after_lstm_layer_size[-1] + cur_feature_layer_size[-1]] + list(
             post_comb_hid_sizes) + [1]
         for h in range(len(post_combined_layer_size) - 2):
             self.post_combined_layers += [nn.Linear(post_combined_layer_size[h], post_combined_layer_size[h + 1]),
@@ -214,6 +225,10 @@ class MLPCritic(nn.Module):
         #    LSTM
         for layer in self.mem_lstm_layers:
             x, (lstm_hidden_state, lstm_cell_state) = layer(x)
+        #    After-LSTM
+        for layer in self.mem_after_lstm_layers:
+            x = layer(x)
+        #    History output mask to reduce disturbance cased by none history memory
         hist_out = torch.gather(x, 1,
                                 (tmp_hist_seg_len - 1).view(-1, 1).repeat(1, self.mem_lstm_layer_sizes[-1]).unsqueeze(
                                     1).long()).squeeze(1)
@@ -252,6 +267,7 @@ class MLPActor(nn.Module):
     def __init__(self, obs_dim, act_dim, act_limit,
                  mem_pre_lstm_hid_sizes=(128,),
                  mem_lstm_hid_sizes=(128,),
+                 mem_after_lstm_hid_size=(128,),
                  cur_feature_hid_sizes=(128,),
                  post_comb_hid_sizes=(128,),
                  mem_gate=True,
@@ -267,6 +283,7 @@ class MLPActor(nn.Module):
         #
         self.mem_pre_lstm_layers = nn.ModuleList()
         self.mem_lstm_layers = nn.ModuleList()
+        self.mem_after_lstm_layers = nn.ModuleList()
 
         self.mem_gate_layer = nn.ModuleList()
 
@@ -288,19 +305,25 @@ class MLPActor(nn.Module):
         for h in range(len(self.mem_lstm_layer_sizes) - 1):
             self.mem_lstm_layers += [
                 nn.LSTM(self.mem_lstm_layer_sizes[h], self.mem_lstm_layer_sizes[h + 1], batch_first=True)]
+        #   After-LSTM
+        self.mem_after_lstm_layer_size = [self.mem_lstm_layer_sizes[-1]] + list(mem_after_lstm_hid_size)
+        for h in range(len(self.mem_after_lstm_layer_size) - 1):
+            self.mem_after_lstm_layers += [nn.Linear(self.mem_after_lstm_layer_size[h],
+                                                     self.mem_after_lstm_layer_size[h + 1]),
+                                           nn.ReLU()]
 
         #    Memeory Gate
         if self.mem_gate:
             if self.mem_gate_before_current_feature_extraction:
                 # Put Memory Gate before feature extraction
                 self.mem_gate_layer += [
-                    nn.Linear(self.mem_lstm_layer_sizes[-1] + obs_dim, self.mem_lstm_layer_sizes[-1]),
+                    nn.Linear(self.self.mem_after_lstm_layer_size[-1] + obs_dim, self.self.mem_after_lstm_layer_size[-1]),
                     nn.Sigmoid()]
             else:
                 # Put Memory Gate after current feature extraction
                 self.mem_gate_layer += [
-                    nn.Linear(self.mem_lstm_layer_sizes[-1] + cur_feature_hid_sizes[-1],
-                              self.mem_lstm_layer_sizes[-1]),
+                    nn.Linear(self.self.mem_after_lstm_layer_size[-1] + cur_feature_hid_sizes[-1],
+                              self.self.mem_after_lstm_layer_size[-1]),
                     nn.Sigmoid()]
 
         # Current Feature Extraction
@@ -310,7 +333,7 @@ class MLPActor(nn.Module):
                                         nn.ReLU()]
 
         # Post-Combination
-        post_combined_layer_size = [self.mem_lstm_layer_sizes[-1] + cur_feature_layer_size[-1]] + list(
+        post_combined_layer_size = [self.mem_after_lstm_layer_size[-1] + cur_feature_layer_size[-1]] + list(
             post_comb_hid_sizes) + [act_dim]
         for h in range(len(post_combined_layer_size) - 2):
             self.post_combined_layers += [nn.Linear(post_combined_layer_size[h], post_combined_layer_size[h + 1]),
@@ -332,6 +355,9 @@ class MLPActor(nn.Module):
         #    LSTM
         for layer in self.mem_lstm_layers:
             x, (lstm_hidden_state, lstm_cell_state) = layer(x)
+        #    After-LSTM
+        for layer in self.mem_after_lstm_layers:
+            x = layer(x)
         hist_out = torch.gather(x, 1,
                                 (tmp_hist_seg_len - 1).view(-1, 1).repeat(1, self.mem_lstm_layer_sizes[-1]).unsqueeze(
                                     1).long()).squeeze(1)
@@ -370,6 +396,7 @@ class MLPActorCritic(nn.Module):
     def __init__(self, obs_dim, act_dim, act_limit=1,
                  critic_mem_pre_lstm_hid_sizes=(128,),
                  critic_mem_lstm_hid_sizes=(128,),
+                 critic_mem_after_lstm_hid_size=(128,),
                  critic_cur_feature_hid_sizes=(128,),
                  critic_post_comb_hid_sizes=(128,),
                  critic_mem_gate=True,
@@ -377,6 +404,7 @@ class MLPActorCritic(nn.Module):
                  critic_hist_with_past_act=False,
                  actor_mem_pre_lstm_hid_sizes=(128,),
                  actor_mem_lstm_hid_sizes=(128,),
+                 actor_mem_after_lstm_hid_size=(128,),
                  actor_cur_feature_hid_sizes=(128,),
                  actor_post_comb_hid_sizes=(128,),
                  actor_mem_gate=True,
@@ -386,6 +414,7 @@ class MLPActorCritic(nn.Module):
         self.q1 = MLPCritic(obs_dim, act_dim,
                             mem_pre_lstm_hid_sizes=critic_mem_pre_lstm_hid_sizes,
                             mem_lstm_hid_sizes=critic_mem_lstm_hid_sizes,
+                            mem_after_lstm_hid_size=critic_mem_after_lstm_hid_size,
                             cur_feature_hid_sizes=critic_cur_feature_hid_sizes,
                             post_comb_hid_sizes=critic_post_comb_hid_sizes,
                             mem_gate=critic_mem_gate,
@@ -394,6 +423,7 @@ class MLPActorCritic(nn.Module):
         self.q2 = MLPCritic(obs_dim, act_dim,
                             mem_pre_lstm_hid_sizes=critic_mem_pre_lstm_hid_sizes,
                             mem_lstm_hid_sizes=critic_mem_lstm_hid_sizes,
+                            mem_after_lstm_hid_size=critic_mem_after_lstm_hid_size,
                             cur_feature_hid_sizes=critic_cur_feature_hid_sizes,
                             post_comb_hid_sizes=critic_post_comb_hid_sizes,
                             mem_gate=critic_mem_gate,
@@ -402,6 +432,7 @@ class MLPActorCritic(nn.Module):
         self.pi = MLPActor(obs_dim, act_dim, act_limit,
                            mem_pre_lstm_hid_sizes=actor_mem_pre_lstm_hid_sizes,
                            mem_lstm_hid_sizes=actor_mem_lstm_hid_sizes,
+                           mem_after_lstm_hid_size=actor_mem_after_lstm_hid_size,
                            cur_feature_hid_sizes=actor_cur_feature_hid_sizes,
                            post_comb_hid_sizes=actor_post_comb_hid_sizes,
                            mem_gate=actor_mem_gate,
@@ -433,6 +464,7 @@ def lstm_td3(env_name, seed=0,
              flicker_prob=0.2, random_noise_sigma=0.1, random_sensor_missing_prob=0.1,
              critic_mem_pre_lstm_hid_sizes=(128,),
              critic_mem_lstm_hid_sizes=(128,),
+             critic_mem_after_lstm_hid_size=(128,),
              critic_cur_feature_hid_sizes=(128,),
              critic_post_comb_hid_sizes=(128,),
              critic_mem_gate=False,
@@ -440,6 +472,7 @@ def lstm_td3(env_name, seed=0,
              critic_hist_with_past_act=False,
              actor_mem_pre_lstm_hid_sizes=(128,),
              actor_mem_lstm_hid_sizes=(128,),
+             actor_mem_after_lstm_hid_size=(128,),
              actor_cur_feature_hid_sizes=(128,),
              actor_post_comb_hid_sizes=(128,),
              actor_mem_gate=False,
@@ -568,6 +601,7 @@ def lstm_td3(env_name, seed=0,
     ac = MLPActorCritic(obs_dim, act_dim, act_limit,
                         critic_mem_pre_lstm_hid_sizes=critic_mem_pre_lstm_hid_sizes,
                         critic_mem_lstm_hid_sizes=critic_mem_lstm_hid_sizes,
+                        critic_mem_after_lstm_hid_size=critic_mem_after_lstm_hid_size,
                         critic_cur_feature_hid_sizes=critic_cur_feature_hid_sizes,
                         critic_post_comb_hid_sizes=critic_post_comb_hid_sizes,
                         critic_mem_gate=critic_mem_gate,
@@ -575,6 +609,7 @@ def lstm_td3(env_name, seed=0,
                         critic_hist_with_past_act=critic_hist_with_past_act,
                         actor_mem_pre_lstm_hid_sizes=actor_mem_pre_lstm_hid_sizes,
                         actor_mem_lstm_hid_sizes=actor_mem_lstm_hid_sizes,
+                        actor_mem_after_lstm_hid_size=actor_mem_after_lstm_hid_size,
                         actor_cur_feature_hid_sizes=actor_cur_feature_hid_sizes,
                         actor_post_comb_hid_sizes=actor_post_comb_hid_sizes,
                         actor_mem_gate=actor_mem_gate,
@@ -861,13 +896,17 @@ if __name__ == '__main__':
     parser.add_argument('--max_hist_len', type=int, default=5)
     parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
     parser.add_argument('--pomdp_type',
-                        choices=['remove_velocity', 'flickering', 'random_noise', 'random_sensor_missing'],
+                        choices=['remove_velocity', 'flickering', 'random_noise', 'random_sensor_missing',
+                                 'remove_velocity_and_flickering', 'remove_velocity_and_random_noise',
+                                 'remove_velocity_and_random_sensor_missing', 'flickering_and_random_noise',
+                                 'random_noise_and_random_sensor_missing', 'random_sensor_missing_and_random_noise'],
                         default='remove_velocity')
     parser.add_argument('--flicker_prob', type=float, default=0.2)
     parser.add_argument('--random_noise_sigma', type=float, default=0.1)
     parser.add_argument('--random_sensor_missing_prob', type=float, default=0.1)
     parser.add_argument('--critic_mem_pre_lstm_hid_sizes', type=tuple, default=(128,))
     parser.add_argument('--critic_mem_lstm_hid_sizes', type=tuple, default=(128,))
+    parser.add_argument('--critic_mem_after_lstm_hid_size', type=tuple, default=(128,))
     parser.add_argument('--critic_cur_feature_hid_sizes', type=tuple, default=(128,128))
     parser.add_argument('--critic_post_comb_hid_sizes', type=tuple, default=(128,))
     parser.add_argument('--critic_mem_gate', type=str2bool, nargs='?', const=True, default=False)
@@ -876,6 +915,7 @@ if __name__ == '__main__':
     parser.add_argument('--critic_hist_with_past_act', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--actor_mem_pre_lstm_hid_sizes', type=tuple, default=(128,))
     parser.add_argument('--actor_mem_lstm_hid_sizes', type=tuple, default=(128,))
+    parser.add_argument('--actor_mem_after_lstm_hid_size', type=tuple, default=(128,))
     parser.add_argument('--actor_cur_feature_hid_sizes', type=tuple, default=(128,128))
     parser.add_argument('--actor_post_comb_hid_sizes', type=tuple, default=(128,))
     parser.add_argument('--actor_mem_gate', type=str2bool, nargs='?', const=True, default=False)
@@ -903,6 +943,7 @@ if __name__ == '__main__':
              random_sensor_missing_prob=args.random_sensor_missing_prob,
              critic_mem_pre_lstm_hid_sizes=args.critic_mem_pre_lstm_hid_sizes,
              critic_mem_lstm_hid_sizes=args.critic_mem_lstm_hid_sizes,
+             critic_mem_after_lstm_hid_size=args.critic_mem_after_lstm_hid_size,
              critic_cur_feature_hid_sizes=args.critic_cur_feature_hid_sizes,
              critic_post_comb_hid_sizes=args.critic_post_comb_hid_sizes,
              critic_mem_gate=args.critic_mem_gate,
@@ -910,6 +951,7 @@ if __name__ == '__main__':
              critic_hist_with_past_act=args.critic_hist_with_past_act,
              actor_mem_pre_lstm_hid_sizes=args.actor_mem_pre_lstm_hid_sizes,
              actor_mem_lstm_hid_sizes=args.actor_mem_lstm_hid_sizes,
+             actor_mem_after_lstm_hid_size=args.actor_mem_after_lstm_hid_size,
              actor_cur_feature_hid_sizes=args.actor_cur_feature_hid_sizes,
              actor_post_comb_hid_sizes=args.actor_post_comb_hid_sizes,
              actor_mem_gate=args.actor_mem_gate,
