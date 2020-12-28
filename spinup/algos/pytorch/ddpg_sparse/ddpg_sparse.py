@@ -264,7 +264,6 @@ def ddpg(env_name, partially_observable=False,
     # Set up function for computing DDPG Q-loss
     def compute_loss_q(data):
         o, a, r, o2, d = data['obs'], data['act'], data['rew'], data['obs2'], data['done']
-
         q, q_hid_activation, q_all_activation = ac.q(o, a)
 
         # Bellman backup for Q function
@@ -273,29 +272,35 @@ def ddpg(env_name, partially_observable=False,
             q_pi_targ, _, _ = ac_targ.q(o2, pi_targ)
             backup = r + gamma * (1 - d) * q_pi_targ
 
-        # q_avg_hid_activation = torch.cat(q_hid_activation, dim=1).mean(axis=0)
+        q_avg_hid_activation = torch.cat(q_hid_activation, dim=1).mean(axis=0)
+        avoid_divide_zero = torch.tensor(1e-15).to(DEVICE)
+        rho = torch.ones(q_avg_hid_activation.shape).to(DEVICE) * critic_sparsity_parameter_rho
+        q_sparsity_penalty = torch.sum(
+            rho * torch.log(rho / (q_avg_hid_activation + avoid_divide_zero)) + (1 - rho) * torch.log(
+                (1 - rho) / (1 - q_avg_hid_activation + avoid_divide_zero)))
+
+        q_error = (q - backup)
+        q_mse = (q_error ** 2).mean()
+        # loss_q = q_mse + critic_sparsity_penalty_beta * q_sparsity_penalty
+        # loss_q = q_mse + torch.abs(q_error).mean() * critic_sparsity_penalty_beta * torch.norm(q_avg_hid_activation)
+
+        # loss_q = q_mse + torch.abs(q_error).mean() * critic_sparsity_penalty_beta * q_sparsity_penalty
+        loss_q = q_mse + torch.abs(q_error).mean() * q_sparsity_penalty
+
+        # # absolute error weighted hidden activation
+        # q_hid_activation = torch.cat(q_hid_activation, dim=1)
+        # q_error = (q - backup)
+        #
+        # q_avg_hid_activation = (
+        #         (torch.abs(q_error) / torch.abs(q_error).sum()).reshape(-1, 1).repeat(1, q_hid_activation.shape[
+        #             1]) * q_hid_activation).sum(axis=0)
         # rho = torch.ones(q_avg_hid_activation.shape).to(DEVICE) * critic_sparsity_parameter_rho
         # q_sparsity_penalty = torch.sum(
         #     rho * torch.log(rho / q_avg_hid_activation) + (1 - rho) * torch.log((1 - rho) / (1 - q_avg_hid_activation)))
         # q_error = (q - backup)
         # q_mse = (q_error ** 2).mean()
-        # # loss_q = q_mse + torch.abs(q_error).mean() * critic_sparsity_penalty_beta * q_sparsity_penalty
-        # loss_q = q_mse + torch.abs(q_error).mean() * q_sparsity_penalty
-
-        # absolute error weighted hidden activation
-        q_hid_activation = torch.cat(q_hid_activation, dim=1)
-        q_error = (q - backup)
-
-        q_avg_hid_activation = (
-                (torch.abs(q_error) / torch.abs(q_error).sum()).reshape(-1, 1).repeat(1, q_hid_activation.shape[
-                    1]) * q_hid_activation).sum(axis=0)
-        rho = torch.ones(q_avg_hid_activation.shape).to(DEVICE) * critic_sparsity_parameter_rho
-        q_sparsity_penalty = torch.sum(
-            rho * torch.log(rho / q_avg_hid_activation) + (1 - rho) * torch.log((1 - rho) / (1 - q_avg_hid_activation)))
-        q_error = (q - backup)
-        q_mse = (q_error ** 2).mean()
-        loss_q = q_mse + critic_sparsity_penalty_beta * q_sparsity_penalty
-
+        # loss_q = q_mse + critic_sparsity_penalty_beta * q_sparsity_penalty
+        # # import pdb; pdb.set_trace()
 
         # q_avg_all_activation = torch.cat(q_all_activation, dim=1).mean(axis=0)
         # avoid_divide_zero = torch.tensor(1e-15).to(DEVICE)
@@ -309,29 +314,10 @@ def ddpg(env_name, partially_observable=False,
         # q_mse = (q_error**2).mean()
         # loss_q = q_mse + torch.abs(q_error).mean()*critic_sparsity_penalty_beta * q_sparsity_penalty
 
-        # Averaged Error
-        # q_error = (q - backup)
-        # q_error[torch.where(q_error > 0)] = q_error[torch.where(q_error > 0)] / (q_error > 0).sum()
-        # q_error[torch.where(q_error<0)] = q_error[torch.where(q_error<0)] / (q_error < 0).sum()
-        # q_mse = (q_error**2).mean()
-        # loss_q = q_mse + critic_sparsity_penalty_beta * q_sparsity_penalty
-
-        # q_error = (q - backup)
-        # q_squared_error = q_error**2
-        # under_estimate_num = (q_error > 0).sum()
-        # over_estimate_num = (q_error < 0).sum()
-        # if under_estimate_num != 0:
-        #     q_squared_error[torch.where(q_error > 0)] = q_squared_error[torch.where(q_error > 0)] / under_estimate_num
-        # if over_estimate_num != 0:
-        #     q_squared_error[torch.where(q_error < 0)] = q_squared_error[torch.where(q_error < 0)] / over_estimate_num
-        # q_mse = q_squared_error.sum()
-        # if torch.isnan(q_mse).sum() != 0:
-        #     import pdb; pdb.set_trace()
-        # loss_q = q_mse
 
         # Useful info for logging
         loss_info = dict(QVals=q.detach().cpu().numpy(),
-                         QHidActivation=q_hid_activation.detach().cpu().numpy(),
+                         QHidActivation=torch.cat(q_hid_activation, dim=1).detach().cpu().numpy(),
                          QSparsityPenalty=q_sparsity_penalty.detach().cpu().numpy(),
                          QMSE=q_mse.detach().cpu().numpy(),
                          QError=q_error.detach().cpu().numpy())
@@ -363,8 +349,9 @@ def ddpg(env_name, partially_observable=False,
 
     def update(data):
         # First run one gradient descent step for Q.
-        q_optimizer.zero_grad()
+
         loss_q, loss_info = compute_loss_q(data)
+        q_optimizer.zero_grad()
         loss_q.backward()
         q_optimizer.step()
 
