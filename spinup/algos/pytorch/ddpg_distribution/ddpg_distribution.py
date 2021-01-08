@@ -13,7 +13,7 @@ from spinup.utils.logx import EpochLogger
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
 
-DEVICE = "cpu"  # "cuda" "cpu"
+DEVICE = "cuda"  # "cuda" "cpu"
 LOG_STD_MAX = 10
 LOG_STD_MIN = -20
 
@@ -61,7 +61,7 @@ class MLPCritic(nn.Module):
         # Hidden layers
         for h_i in range(len(self.layer_sizes) - 2):
             self.layers += [nn.Linear(self.layer_sizes[h_i], self.layer_sizes[h_i + 1]),
-                            nn.Sigmoid()]
+                            nn.ReLU()]
             # Note:
             #   1. ReLU will cause very high Standard Deviation, i.e. SD explosion, with fixed_gamma=0.99.
             #   2. ReLU will not cause SD explosion with adaptive gamma.
