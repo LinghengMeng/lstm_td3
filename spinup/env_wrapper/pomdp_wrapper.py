@@ -98,6 +98,8 @@ class POMDPWrapper(gym.ObservationWrapper):
             # Flickering
             if np.random.rand() <= self.flicker_prob:
                 new_obs = np.zeros(obs.shape)
+            else:
+                new_obs = obs
             # Add random noise
             return (new_obs + np.random.normal(0, self.random_noise_sigma, new_obs.shape)).flatten()
         elif self.pomdp_type == 'random_noise_and_random_sensor_missing':
