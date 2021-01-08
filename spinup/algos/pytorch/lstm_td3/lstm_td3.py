@@ -192,13 +192,13 @@ class MLPCritic(nn.Module):
                 # Put Memory Gate before feature extraction
                 self.mem_gate_layer += [
                     nn.Linear(self.mem_after_lstm_layer_size[-1] + obs_dim + act_dim,
-                              self.self.mem_after_lstm_layer_size[-1]),
+                              self.mem_after_lstm_layer_size[-1]),
                     nn.Sigmoid()]
             else:
                 # Put Memory Gate after current feature extraction
                 self.mem_gate_layer += [
                     nn.Linear(self.mem_after_lstm_layer_size[-1] + cur_feature_layer_size[-1],
-                              self.self.mem_after_lstm_layer_size[-1]),
+                              self.mem_after_lstm_layer_size[-1]),
                     nn.Sigmoid()]
 
         # Post-Combination
@@ -317,13 +317,13 @@ class MLPActor(nn.Module):
             if self.mem_gate_before_current_feature_extraction:
                 # Put Memory Gate before feature extraction
                 self.mem_gate_layer += [
-                    nn.Linear(self.self.mem_after_lstm_layer_size[-1] + obs_dim, self.self.mem_after_lstm_layer_size[-1]),
+                    nn.Linear(self.mem_after_lstm_layer_size[-1] + obs_dim, self.mem_after_lstm_layer_size[-1]),
                     nn.Sigmoid()]
             else:
                 # Put Memory Gate after current feature extraction
                 self.mem_gate_layer += [
-                    nn.Linear(self.self.mem_after_lstm_layer_size[-1] + cur_feature_hid_sizes[-1],
-                              self.self.mem_after_lstm_layer_size[-1]),
+                    nn.Linear(self.mem_after_lstm_layer_size[-1] + cur_feature_hid_sizes[-1],
+                              self.mem_after_lstm_layer_size[-1]),
                     nn.Sigmoid()]
 
         # Current Feature Extraction
@@ -914,7 +914,7 @@ if __name__ == '__main__':
     parser.add_argument('--critic_post_comb_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--critic_mem_gate', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--critic_mem_gate_before_current_feature_extraction', type=str2bool, nargs='?',
-                        const=True, default=False)
+                        const=True, default=True)
     parser.add_argument('--critic_hist_with_past_act', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--actor_mem_pre_lstm_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--actor_mem_lstm_hid_sizes', type=int, nargs="+", default=[128])
@@ -923,7 +923,7 @@ if __name__ == '__main__':
     parser.add_argument('--actor_post_comb_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--actor_mem_gate', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--actor_mem_gate_before_current_feature_extraction', type=str2bool, nargs='?',
-                        const=True, default=False)
+                        const=True, default=True)
     parser.add_argument('--actor_hist_with_past_act', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--exp_name', type=str, default='lstm_td3')
     parser.add_argument("--data_dir", type=str, default='spinup_data_lstm')
