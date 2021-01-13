@@ -251,6 +251,8 @@ class MLPCritic(nn.Module):
                 memory_gate = torch.cat([hist_out * hist_msk, x], dim=-1)
                 for layer in self.mem_gate_layer:
                     memory_gate = layer(memory_gate)
+        else:
+            memory_gate = None  # For logging memory_gate
 
         # Post-Combination
         if self.mem_gate:
@@ -260,7 +262,8 @@ class MLPCritic(nn.Module):
 
         for layer in self.post_combined_layers:
             x = layer(x)
-        return torch.squeeze(x, -1)  # Critical to ensure q has right shape.
+
+        return torch.squeeze(x, -1), memory_gate  # Critical to ensure q has right shape.
 
 
 class MLPActor(nn.Module):
@@ -380,6 +383,8 @@ class MLPActor(nn.Module):
                 memory_gate = torch.cat([hist_out * hist_msk, x], dim=-1)
                 for layer in self.mem_gate_layer:
                     memory_gate = layer(memory_gate)
+        else:
+            memory_gate = None  # For logging memory_gate
 
         # Post-Combination
         if self.mem_gate:
@@ -389,7 +394,7 @@ class MLPActor(nn.Module):
 
         for layer in self.post_combined_layers:
             x = layer(x)
-        return self.act_limit * x
+        return self.act_limit * x, memory_gate
 
 
 class MLPActorCritic(nn.Module):
@@ -445,7 +450,8 @@ class MLPActorCritic(nn.Module):
             hist_act = torch.zeros(1, 1, self.act_dim).to(DEVICE)
             hist_seg_len = torch.zeros(1).to(DEVICE)
         with torch.no_grad():
-            return self.pi(obs, hist_obs, hist_act, hist_seg_len).cpu().numpy()
+            act, _ = self.pi(obs, hist_obs, hist_act, hist_seg_len)
+            return act.cpu().numpy()
 
 
 #######################################################################################
@@ -639,12 +645,12 @@ def lstm_td3(env_name, seed=0,
         h_o, h_a, h_o2, h_a2, h_len = data['hist_obs'], data['hist_act'], data['hist_obs2'], data['hist_act2'], data[
             'hist_len']
 
-        q1 = ac.q1(o, a, h_o, h_a, h_len)
-        q2 = ac.q2(o, a, h_o, h_a, h_len)
+        q1, q1_memory_gate = ac.q1(o, a, h_o, h_a, h_len)
+        q2, q2_memory_gate = ac.q2(o, a, h_o, h_a, h_len)
 
         # Bellman backup for Q functions
         with torch.no_grad():
-            pi_targ = ac_targ.pi(o2, h_o2, h_a2, h_len)
+            pi_targ, _ = ac_targ.pi(o2, h_o2, h_a2, h_len)
 
             # Target policy smoothing
             epsilon = torch.randn_like(pi_targ) * target_noise
@@ -653,8 +659,8 @@ def lstm_td3(env_name, seed=0,
             a2 = torch.clamp(a2, -act_limit, act_limit)
 
             # Target Q-values
-            q1_pi_targ = ac_targ.q1(o2, a2, h_o2, h_a2, h_len)
-            q2_pi_targ = ac_targ.q2(o2, a2, h_o2, h_a2, h_len)
+            q1_pi_targ, _ = ac_targ.q1(o2, a2, h_o2, h_a2, h_len)
+            q2_pi_targ, _ = ac_targ.q2(o2, a2, h_o2, h_a2, h_len)
             q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
             backup = r + gamma * (1 - d) * q_pi_targ
 
@@ -664,16 +670,21 @@ def lstm_td3(env_name, seed=0,
         loss_q = loss_q1 + loss_q2
 
         # Useful info for logging
+        # import pdb; pdb.set_trace()
         loss_info = dict(Q1Vals=q1.detach().cpu().numpy(),
-                         Q2Vals=q2.detach().cpu().numpy())
+                         Q2Vals=q2.detach().cpu().numpy(),
+                         Q1MemoryGate=q1_memory_gate.mean(dim=1).detach().cpu().numpy(),
+                         Q2MemoryGate=q2_memory_gate.mean(dim=1).detach().cpu().numpy())
 
         return loss_q, loss_info
 
     # Set up function for computing TD3 pi loss
     def compute_loss_pi(data):
         o, h_o, h_a, h_len = data['obs'], data['hist_obs'], data['hist_act'], data['hist_len']
-        q1_pi = ac.q1(o, ac.pi(o, h_o, h_a, h_len), h_o, h_a, h_len)
-        return -q1_pi.mean()
+        a, a_memory_gate = ac.pi(o, h_o, h_a, h_len)
+        q1_pi, _ = ac.q1(o, a, h_o, h_a, h_len)
+        loss_info = dict(ActMemoryGate=a_memory_gate.mean(dim=1).detach().cpu().numpy())
+        return -q1_pi.mean(), loss_info
 
     # Set up optimizers for policy and q-function
     pi_optimizer = Adam(ac.pi.parameters(), lr=pi_lr)
@@ -701,7 +712,7 @@ def lstm_td3(env_name, seed=0,
 
             # Next run one gradient descent step for pi.
             pi_optimizer.zero_grad()
-            loss_pi = compute_loss_pi(data)
+            loss_pi, loss_info_pi = compute_loss_pi(data)
             loss_pi.backward()
             pi_optimizer.step()
 
@@ -710,7 +721,7 @@ def lstm_td3(env_name, seed=0,
                 p.requires_grad = True
 
             # Record things
-            logger.store(LossPi=loss_pi.item())
+            logger.store(LossPi=loss_pi.item(), **loss_info_pi)
 
             # Finally, update target networks by polyak averaging.
             with torch.no_grad():
@@ -868,8 +879,12 @@ def lstm_td3(env_name, seed=0,
             logger.log_tabular('TotalEnvInteracts', t)
             logger.log_tabular('Q1Vals', with_min_and_max=True)
             logger.log_tabular('Q2Vals', with_min_and_max=True)
+            logger.log_tabular('Q1MemoryGate', with_min_and_max=True)
+            logger.log_tabular('Q2MemoryGate', with_min_and_max=True)
+            logger.log_tabular('ActMemoryGate', with_min_and_max=True)
             logger.log_tabular('LossPi', average_only=True)
             logger.log_tabular('LossQ', average_only=True)
+
             logger.log_tabular('Time', time.time() - start_time)
             logger.dump_tabular()
 
@@ -912,7 +927,7 @@ if __name__ == '__main__':
     parser.add_argument('--critic_mem_after_lstm_hid_size', type=int, nargs="+", default=[])
     parser.add_argument('--critic_cur_feature_hid_sizes', type=int, nargs="+", default=[128, 128])
     parser.add_argument('--critic_post_comb_hid_sizes', type=int, nargs="+", default=[128])
-    parser.add_argument('--critic_mem_gate', type=str2bool, nargs='?', const=True, default=False)
+    parser.add_argument('--critic_mem_gate', type=str2bool, nargs='?', const=True, default=True)
     parser.add_argument('--critic_mem_gate_before_current_feature_extraction', type=str2bool, nargs='?',
                         const=True, default=True)
     parser.add_argument('--critic_hist_with_past_act', type=str2bool, nargs='?', const=True, default=False)
@@ -921,12 +936,12 @@ if __name__ == '__main__':
     parser.add_argument('--actor_mem_after_lstm_hid_size', type=int, nargs="+", default=[])
     parser.add_argument('--actor_cur_feature_hid_sizes', type=int, nargs="+", default=[128, 128])
     parser.add_argument('--actor_post_comb_hid_sizes', type=int, nargs="+", default=[128])
-    parser.add_argument('--actor_mem_gate', type=str2bool, nargs='?', const=True, default=False)
+    parser.add_argument('--actor_mem_gate', type=str2bool, nargs='?', const=True, default=True)
     parser.add_argument('--actor_mem_gate_before_current_feature_extraction', type=str2bool, nargs='?',
                         const=True, default=True)
     parser.add_argument('--actor_hist_with_past_act', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--exp_name', type=str, default='lstm_td3')
-    parser.add_argument("--data_dir", type=str, default='spinup_data_lstm')
+    parser.add_argument("--data_dir", type=str, default='spinup_data_lstm_gate')
     args = parser.parse_args()
 
     # Set log data saving directory
