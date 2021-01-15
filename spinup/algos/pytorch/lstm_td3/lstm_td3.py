@@ -252,18 +252,20 @@ class MLPCritic(nn.Module):
                 for layer in self.mem_gate_layer:
                     memory_gate = layer(memory_gate)
         else:
-            memory_gate = None  # For logging memory_gate
+            memory_gate = torch.ones(1).to(DEVICE)  # Dummy value for logging memory_gate
 
         # Post-Combination
         if self.mem_gate:
-            x = torch.cat([memory_gate * hist_out * hist_msk, x], dim=-1)
+            extracted_memory = memory_gate * hist_out * hist_msk
+            x = torch.cat([extracted_memory, x], dim=-1)
         else:
-            x = torch.cat([hist_out * hist_msk, x], dim=-1)
+            extracted_memory = hist_out * hist_msk
+            x = torch.cat([extracted_memory, x], dim=-1)
 
         for layer in self.post_combined_layers:
             x = layer(x)
-
-        return torch.squeeze(x, -1), memory_gate  # Critical to ensure q has right shape.
+        # squeeze(x, -1) : critical to ensure q has right shape.
+        return torch.squeeze(x, -1), hist_out, memory_gate, extracted_memory
 
 
 class MLPActor(nn.Module):
@@ -384,17 +386,19 @@ class MLPActor(nn.Module):
                 for layer in self.mem_gate_layer:
                     memory_gate = layer(memory_gate)
         else:
-            memory_gate = None  # For logging memory_gate
+            memory_gate = torch.ones(1).to(DEVICE)  # Dummy value for logging memory_gate
 
         # Post-Combination
         if self.mem_gate:
-            x = torch.cat([memory_gate * hist_out * hist_msk, x], dim=-1)
+            extracted_memory = memory_gate * hist_out * hist_msk
+            x = torch.cat([extracted_memory, x], dim=-1)
         else:
-            x = torch.cat([hist_out * hist_msk, x], dim=-1)
+            extracted_memory = hist_out * hist_msk
+            x = torch.cat([extracted_memory, x], dim=-1)
 
         for layer in self.post_combined_layers:
             x = layer(x)
-        return self.act_limit * x, memory_gate
+        return self.act_limit * x, hist_out, memory_gate, extracted_memory
 
 
 class MLPActorCritic(nn.Module):
@@ -450,7 +454,7 @@ class MLPActorCritic(nn.Module):
             hist_act = torch.zeros(1, 1, self.act_dim).to(DEVICE)
             hist_seg_len = torch.zeros(1).to(DEVICE)
         with torch.no_grad():
-            act, _ = self.pi(obs, hist_obs, hist_act, hist_seg_len)
+            act, _, _, _ = self.pi(obs, hist_obs, hist_act, hist_seg_len)
             return act.cpu().numpy()
 
 
@@ -645,12 +649,12 @@ def lstm_td3(env_name, seed=0,
         h_o, h_a, h_o2, h_a2, h_len = data['hist_obs'], data['hist_act'], data['hist_obs2'], data['hist_act2'], data[
             'hist_len']
 
-        q1, q1_memory_gate = ac.q1(o, a, h_o, h_a, h_len)
-        q2, q2_memory_gate = ac.q2(o, a, h_o, h_a, h_len)
+        q1, q1_hist_out, q1_memory_gate, q1_extracted_memory = ac.q1(o, a, h_o, h_a, h_len)
+        q2, q2_hist_out, q2_memory_gate, q2_extracted_memory = ac.q2(o, a, h_o, h_a, h_len)
 
         # Bellman backup for Q functions
         with torch.no_grad():
-            pi_targ, _ = ac_targ.pi(o2, h_o2, h_a2, h_len)
+            pi_targ, _, _, _ = ac_targ.pi(o2, h_o2, h_a2, h_len)
 
             # Target policy smoothing
             epsilon = torch.randn_like(pi_targ) * target_noise
@@ -659,8 +663,8 @@ def lstm_td3(env_name, seed=0,
             a2 = torch.clamp(a2, -act_limit, act_limit)
 
             # Target Q-values
-            q1_pi_targ, _ = ac_targ.q1(o2, a2, h_o2, h_a2, h_len)
-            q2_pi_targ, _ = ac_targ.q2(o2, a2, h_o2, h_a2, h_len)
+            q1_pi_targ, _, _, _ = ac_targ.q1(o2, a2, h_o2, h_a2, h_len)
+            q2_pi_targ, _, _, _ = ac_targ.q2(o2, a2, h_o2, h_a2, h_len)
             q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
             backup = r + gamma * (1 - d) * q_pi_targ
 
@@ -673,17 +677,23 @@ def lstm_td3(env_name, seed=0,
         # import pdb; pdb.set_trace()
         loss_info = dict(Q1Vals=q1.detach().cpu().numpy(),
                          Q2Vals=q2.detach().cpu().numpy(),
+                         Q1HistOut=q1_hist_out.mean(dim=1).detach().cpu().numpy(),
+                         Q2Histout=q2_hist_out.mean(dim=1).detach().cpu().numpy(),
                          Q1MemoryGate=q1_memory_gate.mean(dim=1).detach().cpu().numpy(),
-                         Q2MemoryGate=q2_memory_gate.mean(dim=1).detach().cpu().numpy())
+                         Q2MemoryGate=q2_memory_gate.mean(dim=1).detach().cpu().numpy(),
+                         Q1ExtractedMemory=q1_extracted_memory.mean(dim=1).detach().cpu().numpy(),
+                         Q2ExtractedMemory=q2_extracted_memory.mean(dim=1).detach().cpu().numpy())
 
         return loss_q, loss_info
 
     # Set up function for computing TD3 pi loss
     def compute_loss_pi(data):
         o, h_o, h_a, h_len = data['obs'], data['hist_obs'], data['hist_act'], data['hist_len']
-        a, a_memory_gate = ac.pi(o, h_o, h_a, h_len)
-        q1_pi, _ = ac.q1(o, a, h_o, h_a, h_len)
-        loss_info = dict(ActMemoryGate=a_memory_gate.mean(dim=1).detach().cpu().numpy())
+        a, a_hist_out, a_memory_gate, a_extracted_memory = ac.pi(o, h_o, h_a, h_len)
+        q1_pi, _, _, _ = ac.q1(o, a, h_o, h_a, h_len)
+        loss_info = dict(ActHistOut=a_hist_out.mean(dim=1).detach().cpu().numpy(),
+                         ActMemoryGate=a_memory_gate.mean(dim=1).detach().cpu().numpy(),
+                         ActExtractedMemory=a_extracted_memory.mean(dim=1).detach().cpu().numpy())
         return -q1_pi.mean(), loss_info
 
     # Set up optimizers for policy and q-function
@@ -879,9 +889,15 @@ def lstm_td3(env_name, seed=0,
             logger.log_tabular('TotalEnvInteracts', t)
             logger.log_tabular('Q1Vals', with_min_and_max=True)
             logger.log_tabular('Q2Vals', with_min_and_max=True)
+            logger.log_tabular('Q1HistOut', with_min_and_max=True)
+            logger.log_tabular('Q2Histout', with_min_and_max=True)
             logger.log_tabular('Q1MemoryGate', with_min_and_max=True)
             logger.log_tabular('Q2MemoryGate', with_min_and_max=True)
+            logger.log_tabular('Q1ExtractedMemory', with_min_and_max=True)
+            logger.log_tabular('Q2ExtractedMemory', with_min_and_max=True)
+            logger.log_tabular('ActHistOut', with_min_and_max=True)
             logger.log_tabular('ActMemoryGate', with_min_and_max=True)
+            logger.log_tabular('ActExtractedMemory', with_min_and_max=True)
             logger.log_tabular('LossPi', average_only=True)
             logger.log_tabular('LossQ', average_only=True)
 
