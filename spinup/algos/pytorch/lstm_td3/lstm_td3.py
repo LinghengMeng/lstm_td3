@@ -231,10 +231,10 @@ class MLPCritic(nn.Module):
             x = layer(x)
         #    History output mask to reduce disturbance cased by none history memory
         hist_out = torch.gather(x, 1,
-                                (tmp_hist_seg_len - 1).view(-1, 1).repeat(1, self.mem_lstm_layer_sizes[-1]).unsqueeze(
+                                (tmp_hist_seg_len - 1).view(-1, 1).repeat(1, self.mem_after_lstm_layer_size[-1]).unsqueeze(
                                     1).long()).squeeze(1)
         if self.use_hist_mask:
-            hist_msk = (hist_seg_len != 0).float().view(-1, 1).repeat(1, self.mem_lstm_layer_sizes[-1]).to(DEVICE)
+            hist_msk = (hist_seg_len != 0).float().view(-1, 1).repeat(1, self.mem_after_lstm_layer_size[-1]).to(DEVICE)
         else:
             hist_msk = torch.ones(hist_out.size()).to(DEVICE)
 
@@ -256,7 +256,7 @@ class MLPCritic(nn.Module):
                 for layer in self.mem_gate_layer:
                     memory_gate = layer(memory_gate)
         else:
-            memory_gate = torch.ones(1).to(DEVICE)  # Dummy value for logging memory_gate
+            memory_gate = torch.ones((1, 1)).to(DEVICE)  # Dummy value for logging memory_gate
 
         # Post-Combination
         if self.mem_gate:
@@ -369,10 +369,10 @@ class MLPActor(nn.Module):
         for layer in self.mem_after_lstm_layers:
             x = layer(x)
         hist_out = torch.gather(x, 1,
-                                (tmp_hist_seg_len - 1).view(-1, 1).repeat(1, self.mem_lstm_layer_sizes[-1]).unsqueeze(
+                                (tmp_hist_seg_len - 1).view(-1, 1).repeat(1, self.mem_after_lstm_layer_size[-1]).unsqueeze(
                                     1).long()).squeeze(1)
         if self.use_hist_mask:
-            hist_msk = (hist_seg_len != 0).float().view(-1, 1).repeat(1, self.mem_lstm_layer_sizes[-1]).to(DEVICE)
+            hist_msk = (hist_seg_len != 0).float().view(-1, 1).repeat(1, self.mem_after_lstm_layer_size[-1]).to(DEVICE)
         else:
             hist_msk = torch.ones(hist_out.size()).to(DEVICE)
 
@@ -394,7 +394,7 @@ class MLPActor(nn.Module):
                 for layer in self.mem_gate_layer:
                     memory_gate = layer(memory_gate)
         else:
-            memory_gate = torch.ones(1).to(DEVICE)  # Dummy value for logging memory_gate
+            memory_gate = torch.ones((1, 1)).to(DEVICE)  # Dummy value for logging memory_gate
 
         # Post-Combination
         if self.mem_gate:
@@ -934,7 +934,6 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 def list2tuple(v):
-    import pdb; pdb.set_trace()
     return tuple(v)
 
 if __name__ == '__main__':
@@ -943,7 +942,7 @@ if __name__ == '__main__':
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=200)
+    parser.add_argument('--epochs', type=int, default=400)
     parser.add_argument('--max_hist_len', type=int, default=5)
     parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
     parser.add_argument('--pomdp_type',
@@ -964,7 +963,7 @@ if __name__ == '__main__':
     parser.add_argument('--critic_mem_gate_before_current_feature_extraction', type=str2bool, nargs='?',
                         const=True, default=True)
     parser.add_argument('--critic_hist_with_past_act', type=str2bool, nargs='?', const=True, default=True)
-    parser.add_argument('--critic_use_hist_mask', type=str2bool, nargs='?', const=True, default=True)
+    parser.add_argument('--critic_use_hist_mask', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--actor_mem_pre_lstm_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--actor_mem_lstm_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--actor_mem_after_lstm_hid_size', type=int, nargs="+", default=[])
@@ -974,7 +973,7 @@ if __name__ == '__main__':
     parser.add_argument('--actor_mem_gate_before_current_feature_extraction', type=str2bool, nargs='?',
                         const=True, default=True)
     parser.add_argument('--actor_hist_with_past_act', type=str2bool, nargs='?', const=True, default=True)
-    parser.add_argument('--actor_use_hist_mask', type=str2bool, nargs='?', const=True, default=True)
+    parser.add_argument('--actor_use_hist_mask', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--exp_name', type=str, default='lstm_td3')
     parser.add_argument("--data_dir", type=str, default='spinup_data_lstm_gate')
     args = parser.parse_args()
