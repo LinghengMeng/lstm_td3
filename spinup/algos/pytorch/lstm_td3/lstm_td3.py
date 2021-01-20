@@ -6,10 +6,13 @@ import time
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from spinup.utils.logx import EpochLogger
+from spinup.utils.logx import EpochLogger, colorize
 import itertools
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
+import os
 import os.path as osp
+import json
+from collections import namedtuple
 
 DEVICE = "cpu"  # "cuda"
 
@@ -474,7 +477,8 @@ class MLPActorCritic(nn.Module):
 #######################################################################################
 
 #######################################################################################
-def lstm_td3(env_name, seed=0,
+def lstm_td3(resume_exp_dir=None,
+             env_name='', seed=0,
              steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
              polyak=0.995, pi_lr=1e-3, q_lr=1e-3,
              start_steps=10000,
@@ -601,9 +605,12 @@ def lstm_td3(env_name, seed=0,
             the current policy and value function.
 
     """
-
-    logger = EpochLogger(**logger_kwargs)
-    logger.save_config(locals())
+    # If not going to resume, create new logger.
+    if resume_exp_dir is None:
+        logger = EpochLogger(**logger_kwargs)
+        logger.save_config(locals())
+    else:
+        logger = EpochLogger(**logger_kwargs)
 
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -717,9 +724,6 @@ def lstm_td3(env_name, seed=0,
     pi_optimizer = Adam(ac.pi.parameters(), lr=pi_lr)
     q_optimizer = Adam(q_params, lr=q_lr)
 
-    # Set up model saving
-    logger.setup_pytorch_saver(ac)
-
     def update(data, timer):
         # First run one gradient descent step for Q1 and Q2
         q_optimizer.zero_grad()
@@ -805,6 +809,7 @@ def lstm_td3(env_name, seed=0,
             logger.store(TestEpRet=ep_ret, TestEpLen=ep_len)
 
     # Prepare for interaction with environment
+    past_t = 0
     total_steps = steps_per_epoch * epochs
     start_time = time.time()
     o, ep_ret, ep_len = env.reset(), 0, 0
@@ -819,13 +824,48 @@ def lstm_td3(env_name, seed=0,
         a_buff = np.zeros([1, act_dim])
         o_buff_len = 0
 
+    # TODO: Restore the checkpoint
+    if resume_exp_dir is not None:
+        # Find the latest checkpoint
+        resume_checkpoint_path = osp.join(resume_exp_dir, "pyt_save")
+        checkpoint_files = os.listdir(resume_checkpoint_path)
+        latest_context_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
+                                         'context' in f_name and 'verified' in f_name])
+        latest_model_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
+                                       'model' in f_name and 'verified' in f_name])
+        if latest_context_version != latest_model_version:
+            latest_version = np.min([latest_context_version, latest_model_version])
+        else:
+            latest_version = latest_context_version
+        latest_context_checkpoint_file_name = 'checkpoint-context-Epoch-{}-verified.pt'.format(latest_version)
+        latest_model_checkpoint_file_name = 'checkpoint-model-Epoch-{}-verified.pt'.format(latest_version)
+        latest_context_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_context_checkpoint_file_name)
+        latest_model_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_model_checkpoint_file_name)
+
+        # Load the latest checkpoint
+        context_checkpoint = torch.load(latest_context_checkpoint_file_path)
+        model_checkpoint = torch.load(latest_model_checkpoint_file_path)
+
+        # Restore experiment context
+        env = context_checkpoint['env']
+        replay_buffer = context_checkpoint['replay_buffer']
+        start_time = context_checkpoint['start_time']
+        o = context_checkpoint['o']
+        ep_ret = context_checkpoint['ep_ret']
+        ep_len = context_checkpoint['ep_len']
+        past_t = context_checkpoint['t']+1    # Crucial add 1 step to t to avoid repeating.
+        o_buff = context_checkpoint['o_buff']
+        a_buff = context_checkpoint['a_buff']
+        o_buff_len = context_checkpoint['o_buff_len']
+
+        # Restore model
+        ac.load_state_dict(model_checkpoint['ac_state_dict'])
+        ac_targ.load_state_dict(model_checkpoint['target_ac_state_dict'])
+        pi_optimizer.load_state_dict(model_checkpoint['pi_optimizer_state_dict'])
+        q_optimizer.load_state_dict(model_checkpoint['q_optimizer_state_dict'])
+
     # Main loop: collect experience in env and update/log each epoch
-    start_time = time.time()
-    for t in range(total_steps):
-        # if t % 200 == 0:
-        #     end_time = time.time()
-        #     print("t={}, {}s".format(t, end_time - start_time))
-        #     start_time = end_time
+    for t in range(past_t, total_steps):  # Start from the step after resuming.
         # Until start_steps have elapsed, randomly sample actions
         # from a uniform distribution for better exploration. Afterwards,
         # use the learned policy (with some noise, via act_noise).
@@ -890,10 +930,6 @@ def lstm_td3(env_name, seed=0,
         if (t + 1) % steps_per_epoch == 0:
             epoch = (t + 1) // steps_per_epoch
 
-            # Save model
-            if (epoch % save_freq == 0) or (epoch == epochs):
-                logger.save_state({'env': env}, None)
-
             # Test the performance of the deterministic version of the agent.
             test_agent()
 
@@ -921,6 +957,40 @@ def lstm_td3(env_name, seed=0,
             logger.log_tabular('Time', time.time() - start_time)
             logger.dump_tabular()
 
+            # Save model after logging epoch summary
+            if (epoch % save_freq == 0) or (epoch == epochs):
+                # Save the context of the learning and learned models
+                fpath = 'pyt_save'
+                fpath = osp.join(logger.output_dir, fpath)
+                os.makedirs(fpath, exist_ok=True)
+                old_checkpoints = os.listdir(fpath)  # Cache old checkpoints to delete later
+                # Separately save context and model to reduce disk space usage.
+                context_fname = 'checkpoint-context-' + ('Epoch-%d' % epoch if epoch is not None else '') + '.pt'
+                model_fname = 'checkpoint-model-' + ('Epoch-%d' % epoch if epoch is not None else '') + '.pt'
+
+                context_elements = {'env': env, 'replay_buffer': replay_buffer,
+                                    'start_time': start_time,
+                                    'o': o, 'ep_ret': ep_ret, 'ep_len': ep_len, 't': t,
+                                    'o_buff': o_buff, 'a_buff': a_buff, 'o_buff_len': o_buff_len}
+                model_elements = {'ac_state_dict': ac.state_dict(),
+                                  'target_ac_state_dict': ac_targ.state_dict(),
+                                  'pi_optimizer_state_dict': pi_optimizer.state_dict(),
+                                  'q_optimizer_state_dict': q_optimizer.state_dict()}
+                context_fname = osp.join(fpath, context_fname)
+                torch.save(context_elements, context_fname)
+                model_fname = osp.join(fpath, model_fname)
+                torch.save(model_elements, model_fname)
+                # Rename the file to verify the completion of the saving.
+                verified_context_fname = osp.join(fpath, 'checkpoint-context-' + (
+                    'Epoch-%d' % epoch if epoch is not None else '') + '-verified.pt')
+                verified_model_fname = osp.join(fpath, 'checkpoint-model-' + (
+                    'Epoch-%d' % epoch if epoch is not None else '') + '-verified.pt')
+                os.rename(context_fname, verified_context_fname)
+                os.rename(model_fname, verified_model_fname)
+                # Remove old checkpoint
+                for old_f in old_checkpoints:
+                    os.remove(osp.join(fpath, old_f))
+
 
 def str2bool(v):
     """Function used in argument parser for converting string to bool."""
@@ -939,7 +1009,8 @@ def list2tuple(v):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--resume_exp_dir', type=str, default=None, help="The directory of the resuming experiment.")
+    parser.add_argument('--env_name', type=str, default='HalfCheetah-v2')
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=400)
@@ -959,7 +1030,7 @@ if __name__ == '__main__':
     parser.add_argument('--critic_mem_after_lstm_hid_size', type=int, nargs="+", default=[])
     parser.add_argument('--critic_cur_feature_hid_sizes', type=int, nargs="+", default=[128, 128])
     parser.add_argument('--critic_post_comb_hid_sizes', type=int, nargs="+", default=[128])
-    parser.add_argument('--critic_mem_gate', type=str2bool, nargs='?', const=True, default=True)
+    parser.add_argument('--critic_mem_gate', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--critic_mem_gate_before_current_feature_extraction', type=str2bool, nargs='?',
                         const=True, default=True)
     parser.add_argument('--critic_hist_with_past_act', type=str2bool, nargs='?', const=True, default=True)
@@ -969,7 +1040,7 @@ if __name__ == '__main__':
     parser.add_argument('--actor_mem_after_lstm_hid_size', type=int, nargs="+", default=[])
     parser.add_argument('--actor_cur_feature_hid_sizes', type=int, nargs="+", default=[128, 128])
     parser.add_argument('--actor_post_comb_hid_sizes', type=int, nargs="+", default=[128])
-    parser.add_argument('--actor_mem_gate', type=str2bool, nargs='?', const=True, default=True)
+    parser.add_argument('--actor_mem_gate', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--actor_mem_gate_before_current_feature_extraction', type=str2bool, nargs='?',
                         const=True, default=True)
     parser.add_argument('--actor_hist_with_past_act', type=str2bool, nargs='?', const=True, default=True)
@@ -979,13 +1050,32 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Set log data saving directory
-    from spinup.utils.run_utils import setup_logger_kwargs
-    data_dir = osp.join(
-        osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
-        args.data_dir)
-    logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
+    if args.resume_exp_dir is None:
+        from spinup.utils.run_utils import setup_logger_kwargs
+        data_dir = osp.join(
+            osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
+            args.data_dir)
+        logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
+    else:
+        # Load config_json
+        resume_exp_dir = args.resume_exp_dir
+        config_path = osp.join(args.resume_exp_dir, 'config.json')
+        with open(osp.join(args.resume_exp_dir, "config.json"), 'r') as config_file:
+            config_json = json.load(config_file)
+        # Update resume_exp_dir value as default is None.
+        config_json['resume_exp_dir'] = resume_exp_dir
+        # Print config_json
+        output = json.dumps(config_json, separators=(',', ':\t'), indent=4, sort_keys=True)
+        print(colorize('Loading config:\n', color='cyan', bold=True))
+        print(output)
+        # Restore the hyper-parameters
+        logger_kwargs = config_json["logger_kwargs"]   # Restore logger_kwargs
+        config_json.pop('logger', None)                # Remove logger from config_json
+        args = json.loads(json.dumps(config_json), object_hook=lambda d: namedtuple('args', d.keys())(*d.values()))
 
-    lstm_td3(args.env,
+
+    lstm_td3(resume_exp_dir=args.resume_exp_dir,
+             env_name=args.env_name,
              gamma=args.gamma, seed=args.seed, epochs=args.epochs,
              max_hist_len=args.max_hist_len,
              partially_observable=args.partially_observable,
