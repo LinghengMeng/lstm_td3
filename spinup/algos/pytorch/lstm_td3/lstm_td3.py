@@ -9,6 +9,7 @@ from torch.optim import Adam
 from spinup.utils.logx import EpochLogger, colorize
 import itertools
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
+from spinup.utils.mpi_tools import proc_id
 import os
 import os.path as osp
 import json
@@ -960,36 +961,37 @@ def lstm_td3(resume_exp_dir=None,
             # Save model after logging epoch summary
             if (epoch % save_freq == 0) or (epoch == epochs):
                 # Save the context of the learning and learned models
-                fpath = 'pyt_save'
-                fpath = osp.join(logger.output_dir, fpath)
-                os.makedirs(fpath, exist_ok=True)
-                old_checkpoints = os.listdir(fpath)  # Cache old checkpoints to delete later
-                # Separately save context and model to reduce disk space usage.
-                context_fname = 'checkpoint-context-' + ('Epoch-%d' % epoch if epoch is not None else '') + '.pt'
-                model_fname = 'checkpoint-model-' + ('Epoch-%d' % epoch if epoch is not None else '') + '.pt'
+                if proc_id() == 0:
+                    fpath = 'pyt_save'
+                    fpath = osp.join(logger.output_dir, fpath)
+                    os.makedirs(fpath, exist_ok=True)
+                    old_checkpoints = os.listdir(fpath)  # Cache old checkpoints to delete later
+                    # Separately save context and model to reduce disk space usage.
+                    context_fname = 'checkpoint-context-' + ('Epoch-%d' % epoch if epoch is not None else '') + '.pt'
+                    model_fname = 'checkpoint-model-' + ('Epoch-%d' % epoch if epoch is not None else '') + '.pt'
 
-                context_elements = {'env': env, 'replay_buffer': replay_buffer,
-                                    'start_time': start_time,
-                                    'o': o, 'ep_ret': ep_ret, 'ep_len': ep_len, 't': t,
-                                    'o_buff': o_buff, 'a_buff': a_buff, 'o_buff_len': o_buff_len}
-                model_elements = {'ac_state_dict': ac.state_dict(),
-                                  'target_ac_state_dict': ac_targ.state_dict(),
-                                  'pi_optimizer_state_dict': pi_optimizer.state_dict(),
-                                  'q_optimizer_state_dict': q_optimizer.state_dict()}
-                context_fname = osp.join(fpath, context_fname)
-                torch.save(context_elements, context_fname)
-                model_fname = osp.join(fpath, model_fname)
-                torch.save(model_elements, model_fname)
-                # Rename the file to verify the completion of the saving.
-                verified_context_fname = osp.join(fpath, 'checkpoint-context-' + (
-                    'Epoch-%d' % epoch if epoch is not None else '') + '-verified.pt')
-                verified_model_fname = osp.join(fpath, 'checkpoint-model-' + (
-                    'Epoch-%d' % epoch if epoch is not None else '') + '-verified.pt')
-                os.rename(context_fname, verified_context_fname)
-                os.rename(model_fname, verified_model_fname)
-                # Remove old checkpoint
-                for old_f in old_checkpoints:
-                    os.remove(osp.join(fpath, old_f))
+                    context_elements = {'env': env, 'replay_buffer': replay_buffer,
+                                        'start_time': start_time,
+                                        'o': o, 'ep_ret': ep_ret, 'ep_len': ep_len, 't': t,
+                                        'o_buff': o_buff, 'a_buff': a_buff, 'o_buff_len': o_buff_len}
+                    model_elements = {'ac_state_dict': ac.state_dict(),
+                                      'target_ac_state_dict': ac_targ.state_dict(),
+                                      'pi_optimizer_state_dict': pi_optimizer.state_dict(),
+                                      'q_optimizer_state_dict': q_optimizer.state_dict()}
+                    context_fname = osp.join(fpath, context_fname)
+                    torch.save(context_elements, context_fname)
+                    model_fname = osp.join(fpath, model_fname)
+                    torch.save(model_elements, model_fname)
+                    # Rename the file to verify the completion of the saving.
+                    verified_context_fname = osp.join(fpath, 'checkpoint-context-' + (
+                        'Epoch-%d' % epoch if epoch is not None else '') + '-verified.pt')
+                    verified_model_fname = osp.join(fpath, 'checkpoint-model-' + (
+                        'Epoch-%d' % epoch if epoch is not None else '') + '-verified.pt')
+                    os.rename(context_fname, verified_context_fname)
+                    os.rename(model_fname, verified_model_fname)
+                    # Remove old checkpoint
+                    for old_f in old_checkpoints:
+                        os.remove(osp.join(fpath, old_f))
 
 
 def str2bool(v):
