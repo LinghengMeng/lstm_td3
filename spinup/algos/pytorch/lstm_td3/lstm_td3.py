@@ -1030,7 +1030,7 @@ if __name__ == '__main__':
     parser.add_argument('--critic_mem_pre_lstm_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--critic_mem_lstm_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--critic_mem_after_lstm_hid_size', type=int, nargs="+", default=[])
-    parser.add_argument('--critic_cur_feature_hid_sizes', type=int, nargs="+", default=[128, 128])
+    parser.add_argument('--critic_cur_feature_hid_sizes', type=int, nargs="?", default=[128, 128])
     parser.add_argument('--critic_post_comb_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--critic_mem_gate', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--critic_mem_gate_before_current_feature_extraction', type=str2bool, nargs='?',
@@ -1040,7 +1040,7 @@ if __name__ == '__main__':
     parser.add_argument('--actor_mem_pre_lstm_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--actor_mem_lstm_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--actor_mem_after_lstm_hid_size', type=int, nargs="+", default=[])
-    parser.add_argument('--actor_cur_feature_hid_sizes', type=int, nargs="+", default=[128, 128])
+    parser.add_argument('--actor_cur_feature_hid_sizes', type=int, nargs="?", default=[128, 128])
     parser.add_argument('--actor_post_comb_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--actor_mem_gate', type=str2bool, nargs='?', const=True, default=False)
     parser.add_argument('--actor_mem_gate_before_current_feature_extraction', type=str2bool, nargs='?',
@@ -1050,6 +1050,13 @@ if __name__ == '__main__':
     parser.add_argument('--exp_name', type=str, default='lstm_td3')
     parser.add_argument("--data_dir", type=str, default='spinup_data_lstm_gate')
     args = parser.parse_args()
+
+    # Interpret without current feature extraction.
+    if args.critic_cur_feature_hid_sizes is None:
+        args.critic_cur_feature_hid_sizes = []
+    if args.actor_cur_feature_hid_sizes is None:
+        args.actor_cur_feature_hid_sizes = []
+
 
     # Set log data saving directory
     if args.resume_exp_dir is None:
