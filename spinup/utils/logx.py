@@ -9,6 +9,7 @@ import json
 import joblib
 import shutil
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 import torch
 import os.path as osp, time, atexit, os
@@ -101,14 +102,28 @@ class Logger:
                 print("Warning: Log dir %s already exists! Storing info there anyway."%self.output_dir)
             else:
                 os.makedirs(self.output_dir)
-            self.output_file = open(osp.join(self.output_dir, output_fname), 'w')
+
+            # If exist progress.txt, append results to progress.txt.
+            self.output_file_path = osp.join(self.output_dir, output_fname)
+            if osp.exists(self.output_file_path):
+                open_mode = 'a'
+                self.first_row = False
+                # IF progress.txt is not empty, read headers. Otherwise, set headders to [].
+                if os.path.getsize(self.output_file_path) > 0:
+                    self.log_headers = pd.read_csv(self.output_file_path, sep='\t').keys().tolist() # Read header
+                else:
+                    self.log_headers = []
+            else:
+                open_mode = 'w'
+                self.first_row = True
+                self.log_headers = []
+            self.output_file = open(self.output_file_path, open_mode)
             atexit.register(self.output_file.close)
             print(colorize("Logging data to %s"%self.output_file.name, 'green', bold=True))
         else:
             self.output_dir = None
             self.output_file = None
-        self.first_row=True
-        self.log_headers = []
+
         self.log_current_row = {}
         self.exp_name = exp_name
 
