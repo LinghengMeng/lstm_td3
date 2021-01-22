@@ -1,6 +1,7 @@
 from copy import deepcopy
 import numpy as np
-import pybulletgym
+import pybulletgym      # To register tasks in PyBulletGym
+import pybullet_envs    # To register tasks in PyBullet
 import gym
 import time
 import torch
@@ -810,11 +811,11 @@ def lstm_td3(resume_exp_dir=None,
             logger.store(TestEpRet=ep_ret, TestEpLen=ep_len)
 
     # Prepare for interaction with environment
-    past_t = 0
+
     total_steps = steps_per_epoch * epochs
     start_time = time.time()
+    past_t = 0
     o, ep_ret, ep_len = env.reset(), 0, 0
-
     if max_hist_len > 0:
         o_buff = np.zeros([max_hist_len, obs_dim])
         a_buff = np.zeros([max_hist_len, act_dim])
@@ -825,47 +826,40 @@ def lstm_td3(resume_exp_dir=None,
         a_buff = np.zeros([1, act_dim])
         o_buff_len = 0
 
-    # TODO: Restore the checkpoint
     if resume_exp_dir is not None:
-        if proc_id() == 0:
-            # Find the latest checkpoint
-            resume_checkpoint_path = osp.join(resume_exp_dir, "pyt_save")
-            checkpoint_files = os.listdir(resume_checkpoint_path)
-            latest_context_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
-                                             'context' in f_name and 'verified' in f_name])
-            latest_model_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
-                                           'model' in f_name and 'verified' in f_name])
-            if latest_context_version != latest_model_version:
-                latest_version = np.min([latest_context_version, latest_model_version])
-            else:
-                latest_version = latest_context_version
-            latest_context_checkpoint_file_name = 'checkpoint-context-Epoch-{}-verified.pt'.format(latest_version)
-            latest_model_checkpoint_file_name = 'checkpoint-model-Epoch-{}-verified.pt'.format(latest_version)
-            latest_context_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_context_checkpoint_file_name)
-            latest_model_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_model_checkpoint_file_name)
+        # Find the latest checkpoint
+        resume_checkpoint_path = osp.join(resume_exp_dir, "pyt_save")
+        checkpoint_files = os.listdir(resume_checkpoint_path)
+        latest_context_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
+                                         'context' in f_name and 'verified' in f_name])
+        latest_model_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
+                                       'model' in f_name and 'verified' in f_name])
+        if latest_context_version != latest_model_version:
+            latest_version = np.min([latest_context_version, latest_model_version])
+        else:
+            latest_version = latest_context_version
+        latest_context_checkpoint_file_name = 'checkpoint-context-Step-{}-verified.pt'.format(latest_version)
+        latest_model_checkpoint_file_name = 'checkpoint-model-Step-{}-verified.pt'.format(latest_version)
+        latest_context_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_context_checkpoint_file_name)
+        latest_model_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_model_checkpoint_file_name)
 
-            # Load the latest checkpoint
-            context_checkpoint = torch.load(latest_context_checkpoint_file_path)
-            model_checkpoint = torch.load(latest_model_checkpoint_file_path)
+        # Load the latest checkpoint
+        context_checkpoint = torch.load(latest_context_checkpoint_file_path)
+        model_checkpoint = torch.load(latest_model_checkpoint_file_path)
 
-            # Restore experiment context
-            env = context_checkpoint['env']
-            replay_buffer = context_checkpoint['replay_buffer']
-            start_time = context_checkpoint['start_time']
-            o = context_checkpoint['o']
-            ep_ret = context_checkpoint['ep_ret']
-            ep_len = context_checkpoint['ep_len']
-            past_t = context_checkpoint['t']+1    # Crucial add 1 step to t to avoid repeating.
-            o_buff = context_checkpoint['o_buff']
-            a_buff = context_checkpoint['a_buff']
-            o_buff_len = context_checkpoint['o_buff_len']
+        # Restore experiment context
+        logger.epoch_dict = context_checkpoint['logger_epoch_dict']
+        replay_buffer = context_checkpoint['replay_buffer']
+        start_time = context_checkpoint['start_time']
+        past_t = context_checkpoint['t'] + 1  # Crucial add 1 step to t to avoid repeating.
 
-            # Restore model
-            ac.load_state_dict(model_checkpoint['ac_state_dict'])
-            ac_targ.load_state_dict(model_checkpoint['target_ac_state_dict'])
-            pi_optimizer.load_state_dict(model_checkpoint['pi_optimizer_state_dict'])
-            q_optimizer.load_state_dict(model_checkpoint['q_optimizer_state_dict'])
+        # Restore model
+        ac.load_state_dict(model_checkpoint['ac_state_dict'])
+        ac_targ.load_state_dict(model_checkpoint['target_ac_state_dict'])
+        pi_optimizer.load_state_dict(model_checkpoint['pi_optimizer_state_dict'])
+        q_optimizer.load_state_dict(model_checkpoint['q_optimizer_state_dict'])
 
+    print("past_t={}".format(past_t))
     # Main loop: collect experience in env and update/log each epoch
     for t in range(past_t, total_steps):  # Start from the step after resuming.
         # Until start_steps have elapsed, randomly sample actions
@@ -921,6 +915,39 @@ def lstm_td3(resume_exp_dir=None,
                 a_buff = np.zeros([1, act_dim])
                 o_buff_len = 0
 
+            # Store checkpoint at the end of trajectory, so there is no need to store env as resume env in PyBullet is problematic.
+            # Save the context of the learning and learned models
+            fpath = 'pyt_save'
+            fpath = osp.join(logger.output_dir, fpath)
+            os.makedirs(fpath, exist_ok=True)
+            old_checkpoints = os.listdir(fpath)  # Cache old checkpoints to delete later
+            # Separately save context and model to reduce disk space usage.
+            context_fname = 'checkpoint-context-' + (
+                'Step-%d' % t if t is not None else '') + '.pt'
+            model_fname = 'checkpoint-model-' + ('Step-%d' % t if t is not None else '') + '.pt'
+
+            context_elements = {'env': env, 'replay_buffer': replay_buffer,
+                                'logger_epoch_dict': logger.epoch_dict,
+                                'start_time': start_time, 't': t}
+            model_elements = {'ac_state_dict': ac.state_dict(),
+                              'target_ac_state_dict': ac_targ.state_dict(),
+                              'pi_optimizer_state_dict': pi_optimizer.state_dict(),
+                              'q_optimizer_state_dict': q_optimizer.state_dict()}
+            context_fname = osp.join(fpath, context_fname)
+            torch.save(context_elements, context_fname)
+            model_fname = osp.join(fpath, model_fname)
+            torch.save(model_elements, model_fname)
+            # Rename the file to verify the completion of the saving.
+            verified_context_fname = osp.join(fpath, 'checkpoint-context-' + (
+                'Step-%d' % t if t is not None else '') + '-verified.pt')
+            verified_model_fname = osp.join(fpath, 'checkpoint-model-' + (
+                'Step-%d' % t if t is not None else '') + '-verified.pt')
+            os.rename(context_fname, verified_context_fname)
+            os.rename(model_fname, verified_model_fname)
+            # Remove old checkpoint
+            for old_f in old_checkpoints:
+                os.remove(osp.join(fpath, old_f))
+
         # Update handling
         if t >= update_after and t % update_every == 0:
             for j in range(update_every):
@@ -931,7 +958,6 @@ def lstm_td3(resume_exp_dir=None,
         # End of epoch handling
         if (t + 1) % steps_per_epoch == 0:
             epoch = (t + 1) // steps_per_epoch
-
             # Test the performance of the deterministic version of the agent.
             test_agent()
 
@@ -958,41 +984,6 @@ def lstm_td3(resume_exp_dir=None,
 
             logger.log_tabular('Time', time.time() - start_time)
             logger.dump_tabular()
-
-            # Save model after logging epoch summary
-            if (epoch % save_freq == 0) or (epoch == epochs):
-                # Save the context of the learning and learned models
-                if proc_id() == 0:
-                    fpath = 'pyt_save'
-                    fpath = osp.join(logger.output_dir, fpath)
-                    os.makedirs(fpath, exist_ok=True)
-                    old_checkpoints = os.listdir(fpath)  # Cache old checkpoints to delete later
-                    # Separately save context and model to reduce disk space usage.
-                    context_fname = 'checkpoint-context-' + ('Epoch-%d' % epoch if epoch is not None else '') + '.pt'
-                    model_fname = 'checkpoint-model-' + ('Epoch-%d' % epoch if epoch is not None else '') + '.pt'
-
-                    context_elements = {'env': env, 'replay_buffer': replay_buffer,
-                                        'start_time': start_time,
-                                        'o': o, 'ep_ret': ep_ret, 'ep_len': ep_len, 't': t,
-                                        'o_buff': o_buff, 'a_buff': a_buff, 'o_buff_len': o_buff_len}
-                    model_elements = {'ac_state_dict': ac.state_dict(),
-                                      'target_ac_state_dict': ac_targ.state_dict(),
-                                      'pi_optimizer_state_dict': pi_optimizer.state_dict(),
-                                      'q_optimizer_state_dict': q_optimizer.state_dict()}
-                    context_fname = osp.join(fpath, context_fname)
-                    torch.save(context_elements, context_fname)
-                    model_fname = osp.join(fpath, model_fname)
-                    torch.save(model_elements, model_fname)
-                    # Rename the file to verify the completion of the saving.
-                    verified_context_fname = osp.join(fpath, 'checkpoint-context-' + (
-                        'Epoch-%d' % epoch if epoch is not None else '') + '-verified.pt')
-                    verified_model_fname = osp.join(fpath, 'checkpoint-model-' + (
-                        'Epoch-%d' % epoch if epoch is not None else '') + '-verified.pt')
-                    os.rename(context_fname, verified_context_fname)
-                    os.rename(model_fname, verified_model_fname)
-                    # Remove old checkpoint
-                    for old_f in old_checkpoints:
-                        os.remove(osp.join(fpath, old_f))
 
 
 def str2bool(v):
