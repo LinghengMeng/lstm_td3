@@ -1066,21 +1066,22 @@ if __name__ == '__main__':
             args.data_dir)
         logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
     else:
-        # Load config_json
-        resume_exp_dir = args.resume_exp_dir
-        config_path = osp.join(args.resume_exp_dir, 'config.json')
-        with open(osp.join(args.resume_exp_dir, "config.json"), 'r') as config_file:
-            config_json = json.load(config_file)
-        # Update resume_exp_dir value as default is None.
-        config_json['resume_exp_dir'] = resume_exp_dir
-        # Print config_json
-        output = json.dumps(config_json, separators=(',', ':\t'), indent=4, sort_keys=True)
-        print(colorize('Loading config:\n', color='cyan', bold=True))
-        print(output)
-        # Restore the hyper-parameters
-        logger_kwargs = config_json["logger_kwargs"]   # Restore logger_kwargs
-        config_json.pop('logger', None)                # Remove logger from config_json
-        args = json.loads(json.dumps(config_json), object_hook=lambda d: namedtuple('args', d.keys())(*d.values()))
+        if proc_id() == 0:
+            # Load config_json
+            resume_exp_dir = args.resume_exp_dir
+            config_path = osp.join(args.resume_exp_dir, 'config.json')
+            with open(osp.join(args.resume_exp_dir, "config.json"), 'r') as config_file:
+                config_json = json.load(config_file)
+            # Update resume_exp_dir value as default is None.
+            config_json['resume_exp_dir'] = resume_exp_dir
+            # Print config_json
+            output = json.dumps(config_json, separators=(',', ':\t'), indent=4, sort_keys=True)
+            print(colorize('Loading config:\n', color='cyan', bold=True))
+            print(output)
+            # Restore the hyper-parameters
+            logger_kwargs = config_json["logger_kwargs"]   # Restore logger_kwargs
+            config_json.pop('logger', None)                # Remove logger from config_json
+            args = json.loads(json.dumps(config_json), object_hook=lambda d: namedtuple('args', d.keys())(*d.values()))
 
 
     lstm_td3(resume_exp_dir=args.resume_exp_dir,
