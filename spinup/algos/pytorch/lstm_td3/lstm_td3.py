@@ -827,43 +827,44 @@ def lstm_td3(resume_exp_dir=None,
 
     # TODO: Restore the checkpoint
     if resume_exp_dir is not None:
-        # Find the latest checkpoint
-        resume_checkpoint_path = osp.join(resume_exp_dir, "pyt_save")
-        checkpoint_files = os.listdir(resume_checkpoint_path)
-        latest_context_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
-                                         'context' in f_name and 'verified' in f_name])
-        latest_model_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
-                                       'model' in f_name and 'verified' in f_name])
-        if latest_context_version != latest_model_version:
-            latest_version = np.min([latest_context_version, latest_model_version])
-        else:
-            latest_version = latest_context_version
-        latest_context_checkpoint_file_name = 'checkpoint-context-Epoch-{}-verified.pt'.format(latest_version)
-        latest_model_checkpoint_file_name = 'checkpoint-model-Epoch-{}-verified.pt'.format(latest_version)
-        latest_context_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_context_checkpoint_file_name)
-        latest_model_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_model_checkpoint_file_name)
+        if proc_id() == 0:
+            # Find the latest checkpoint
+            resume_checkpoint_path = osp.join(resume_exp_dir, "pyt_save")
+            checkpoint_files = os.listdir(resume_checkpoint_path)
+            latest_context_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
+                                             'context' in f_name and 'verified' in f_name])
+            latest_model_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
+                                           'model' in f_name and 'verified' in f_name])
+            if latest_context_version != latest_model_version:
+                latest_version = np.min([latest_context_version, latest_model_version])
+            else:
+                latest_version = latest_context_version
+            latest_context_checkpoint_file_name = 'checkpoint-context-Epoch-{}-verified.pt'.format(latest_version)
+            latest_model_checkpoint_file_name = 'checkpoint-model-Epoch-{}-verified.pt'.format(latest_version)
+            latest_context_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_context_checkpoint_file_name)
+            latest_model_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_model_checkpoint_file_name)
 
-        # Load the latest checkpoint
-        context_checkpoint = torch.load(latest_context_checkpoint_file_path)
-        model_checkpoint = torch.load(latest_model_checkpoint_file_path)
+            # Load the latest checkpoint
+            context_checkpoint = torch.load(latest_context_checkpoint_file_path)
+            model_checkpoint = torch.load(latest_model_checkpoint_file_path)
 
-        # Restore experiment context
-        env = context_checkpoint['env']
-        replay_buffer = context_checkpoint['replay_buffer']
-        start_time = context_checkpoint['start_time']
-        o = context_checkpoint['o']
-        ep_ret = context_checkpoint['ep_ret']
-        ep_len = context_checkpoint['ep_len']
-        past_t = context_checkpoint['t']+1    # Crucial add 1 step to t to avoid repeating.
-        o_buff = context_checkpoint['o_buff']
-        a_buff = context_checkpoint['a_buff']
-        o_buff_len = context_checkpoint['o_buff_len']
+            # Restore experiment context
+            env = context_checkpoint['env']
+            replay_buffer = context_checkpoint['replay_buffer']
+            start_time = context_checkpoint['start_time']
+            o = context_checkpoint['o']
+            ep_ret = context_checkpoint['ep_ret']
+            ep_len = context_checkpoint['ep_len']
+            past_t = context_checkpoint['t']+1    # Crucial add 1 step to t to avoid repeating.
+            o_buff = context_checkpoint['o_buff']
+            a_buff = context_checkpoint['a_buff']
+            o_buff_len = context_checkpoint['o_buff_len']
 
-        # Restore model
-        ac.load_state_dict(model_checkpoint['ac_state_dict'])
-        ac_targ.load_state_dict(model_checkpoint['target_ac_state_dict'])
-        pi_optimizer.load_state_dict(model_checkpoint['pi_optimizer_state_dict'])
-        q_optimizer.load_state_dict(model_checkpoint['q_optimizer_state_dict'])
+            # Restore model
+            ac.load_state_dict(model_checkpoint['ac_state_dict'])
+            ac_targ.load_state_dict(model_checkpoint['target_ac_state_dict'])
+            pi_optimizer.load_state_dict(model_checkpoint['pi_optimizer_state_dict'])
+            q_optimizer.load_state_dict(model_checkpoint['q_optimizer_state_dict'])
 
     # Main loop: collect experience in env and update/log each epoch
     for t in range(past_t, total_steps):  # Start from the step after resuming.
