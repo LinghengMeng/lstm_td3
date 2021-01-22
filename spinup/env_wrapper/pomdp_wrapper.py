@@ -152,6 +152,38 @@ class POMDPWrapper(gym.ObservationWrapper):
             remain_obs_idx = list(np.arange(0, 22)) + list(np.arange(45, 185)) + list(np.arange(269, 376))
         elif env_name == 'HumanoidStandup-v2':
             remain_obs_idx = list(np.arange(0, 22)) + list(np.arange(45, 185)) + list(np.arange(269, 376))
+        # PyBulletEnv:
+        #   The following is not implemented:
+        #       HumanoidDeepMimicBulletEnv - v1
+        #       CartPoleBulletEnv - v1
+        #       MinitaurBulletEnv - v0
+        #       MinitaurBulletDuckEnv - v0
+        #       RacecarBulletEnv - v0
+        #       RacecarZedBulletEnv - v0
+        #       KukaBulletEnv - v0
+        #       KukaCamBulletEnv - v0
+        #       PusherBulletEnv - v0
+        #       ThrowerBulletEnv - v0
+        #       StrikerBulletEnv - v0
+        #       HumanoidBulletEnv - v0
+        #       HumanoidFlagrunBulletEnv - v0
+        #       HumanoidFlagrunHarderBulletEnv - v0
+        elif env_name == 'HalfCheetahBulletEnv-v0':
+            remain_obs_idx = list(set(np.arange(0, 26)) - set(np.arange(3, 6)))
+        elif env_name == 'AntBulletEnv-v0':
+            remain_obs_idx = list(set(np.arange(0, 28)) - set(np.arange(3, 6)))
+        elif env_name == 'HopperBulletEnv-v0':
+            remain_obs_idx = list(set(np.arange(0, 15)) - set(np.arange(3, 6)))
+        elif env_name == 'Walker2DBulletEnv-v0':
+            remain_obs_idx = list(set(np.arange(0, 22)) - set(np.arange(3, 6)))
+        elif env_name == 'InvertedPendulumBulletEnv-v0':
+            remain_obs_idx = list(set(np.arange(0, 5)) - set([1, 4]))
+        elif env_name == 'InvertedDoublePendulumBulletEnv-v0':
+            remain_obs_idx = list(set(np.arange(0, 9)) - set([1, 5, 8]))
+        elif env_name == 'InvertedPendulumSwingupBulletEnv-v0':
+            pass
+        elif env_name == 'ReacherBulletEnv-v0':
+            remain_obs_idx = list(set(np.arange(0, 9)) - set([6, 8]))
         # PyBulletGym
         #  1. MuJoCo
         elif env_name == 'HalfCheetahMuJoCoEnv-v0':
