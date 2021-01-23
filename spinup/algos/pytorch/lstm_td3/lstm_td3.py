@@ -1003,7 +1003,7 @@ def list2tuple(v):
     return tuple(v)
 
 if __name__ == '__main__':
-    print("Process ID: {}".format(proc_id))
+    print("Process ID: {}".format(proc_id()))
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--resume_exp_dir', type=str, default=None, help="The directory of the resuming experiment.")
