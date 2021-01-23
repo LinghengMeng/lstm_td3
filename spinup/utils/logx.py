@@ -123,6 +123,8 @@ class Logger:
         else:
             self.output_dir = None
             self.output_file = None
+            self.first_row = True
+            self.log_headers = []
 
         self.log_current_row = {}
         self.exp_name = exp_name
