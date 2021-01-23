@@ -107,11 +107,12 @@ class Logger:
             self.output_file_path = osp.join(self.output_dir, output_fname)
             if osp.exists(self.output_file_path):
                 open_mode = 'a'
-                self.first_row = False
                 # IF progress.txt is not empty, read headers. Otherwise, set headders to [].
                 if os.path.getsize(self.output_file_path) > 0:
+                    self.first_row = False
                     self.log_headers = pd.read_csv(self.output_file_path, sep='\t').keys().tolist() # Read header
                 else:
+                    self.first_row = True
                     self.log_headers = []
             else:
                 open_mode = 'w'
