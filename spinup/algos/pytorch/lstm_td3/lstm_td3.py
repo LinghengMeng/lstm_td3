@@ -491,6 +491,7 @@ def lstm_td3(resume_exp_dir=None,
              partially_observable=False,
              pomdp_type = 'remove_velocity',
              flicker_prob=0.2, random_noise_sigma=0.1, random_sensor_missing_prob=0.1,
+             use_double_critic = True,
              critic_mem_pre_lstm_hid_sizes=(128,),
              critic_mem_lstm_hid_sizes=(128,),
              critic_mem_after_lstm_hid_size=(128,),
@@ -691,13 +692,21 @@ def lstm_td3(resume_exp_dir=None,
             # Target Q-values
             q1_pi_targ, _, _, _ = ac_targ.q1(o2, a2, h_o2, h_a2, h_len)
             q2_pi_targ, _, _, _ = ac_targ.q2(o2, a2, h_o2, h_a2, h_len)
-            q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
+
+            if use_double_critic:
+                q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
+            else:
+                q_pi_targ = q1_pi_targ
             backup = r + gamma * (1 - d) * q_pi_targ
 
         # MSE loss against Bellman backup
         loss_q1 = ((q1 - backup) ** 2).mean()
         loss_q2 = ((q2 - backup) ** 2).mean()
-        loss_q = loss_q1 + loss_q2
+
+        if use_double_critic:
+            loss_q = loss_q1 + loss_q2
+        else:
+            loss_q = loss_q1
 
         # Useful info for logging
         # import pdb; pdb.set_trace()
@@ -1022,6 +1031,8 @@ if __name__ == '__main__':
     parser.add_argument('--flicker_prob', type=float, default=0.2)
     parser.add_argument('--random_noise_sigma', type=float, default=0.1)
     parser.add_argument('--random_sensor_missing_prob', type=float, default=0.1)
+    parser.add_argument('--use_double_critic', type=str2bool, nargs='?', const=True, default=True,
+                        help="Using double critic")
     parser.add_argument('--critic_mem_pre_lstm_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--critic_mem_lstm_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--critic_mem_after_lstm_hid_size', type=int, nargs="+", default=[])
@@ -1088,6 +1099,7 @@ if __name__ == '__main__':
              flicker_prob=args.flicker_prob,
              random_noise_sigma=args.random_noise_sigma,
              random_sensor_missing_prob=args.random_sensor_missing_prob,
+             use_double_critic=args.use_double_critic,
              critic_mem_pre_lstm_hid_sizes=tuple(args.critic_mem_pre_lstm_hid_sizes),
              critic_mem_lstm_hid_sizes=tuple(args.critic_mem_lstm_hid_sizes),
              critic_mem_after_lstm_hid_size=tuple(args.critic_mem_after_lstm_hid_size),
