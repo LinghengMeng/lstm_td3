@@ -492,6 +492,7 @@ def lstm_td3(resume_exp_dir=None,
              pomdp_type = 'remove_velocity',
              flicker_prob=0.2, random_noise_sigma=0.1, random_sensor_missing_prob=0.1,
              use_double_critic = True,
+             use_target_policy_smooth = True,
              critic_mem_pre_lstm_hid_sizes=(128,),
              critic_mem_lstm_hid_sizes=(128,),
              critic_mem_after_lstm_hid_size=(128,),
@@ -684,10 +685,13 @@ def lstm_td3(resume_exp_dir=None,
             pi_targ, _, _, _ = ac_targ.pi(o2, h_o2, h_a2, h_len)
 
             # Target policy smoothing
-            epsilon = torch.randn_like(pi_targ) * target_noise
-            epsilon = torch.clamp(epsilon, -noise_clip, noise_clip)
-            a2 = pi_targ + epsilon
-            a2 = torch.clamp(a2, -act_limit, act_limit)
+            if use_target_policy_smooth:
+                epsilon = torch.randn_like(pi_targ) * target_noise
+                epsilon = torch.clamp(epsilon, -noise_clip, noise_clip)
+                a2 = pi_targ + epsilon
+                a2 = torch.clamp(a2, -act_limit, act_limit)
+            else:
+                a2 = pi_targ
 
             # Target Q-values
             q1_pi_targ, _, _, _ = ac_targ.q1(o2, a2, h_o2, h_a2, h_len)
@@ -1033,6 +1037,8 @@ if __name__ == '__main__':
     parser.add_argument('--random_sensor_missing_prob', type=float, default=0.1)
     parser.add_argument('--use_double_critic', type=str2bool, nargs='?', const=True, default=True,
                         help="Using double critic")
+    parser.add_argument('--use_target_policy_smooth', type=str2bool, nargs='?', const=True, default=True,
+                        help="Using target policy smoothing")
     parser.add_argument('--critic_mem_pre_lstm_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--critic_mem_lstm_hid_sizes', type=int, nargs="+", default=[128])
     parser.add_argument('--critic_mem_after_lstm_hid_size', type=int, nargs="+", default=[])
@@ -1100,6 +1106,7 @@ if __name__ == '__main__':
              random_noise_sigma=args.random_noise_sigma,
              random_sensor_missing_prob=args.random_sensor_missing_prob,
              use_double_critic=args.use_double_critic,
+             use_target_policy_smooth=args.use_target_policy_smooth,
              critic_mem_pre_lstm_hid_sizes=tuple(args.critic_mem_pre_lstm_hid_sizes),
              critic_mem_lstm_hid_sizes=tuple(args.critic_mem_lstm_hid_sizes),
              critic_mem_after_lstm_hid_size=tuple(args.critic_mem_after_lstm_hid_size),
