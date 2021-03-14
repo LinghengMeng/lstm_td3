@@ -10,5 +10,6 @@ How To Use
 ------------------
 Clone the `lstm_td3` repository anywhere you'd like. (For example, in `~/lstm_td3`).
 Then run the following to install the lstm_td3 code into your conda environment: 
+
     `cd ~/lstm_td3`
     `pip install -e .`
