@@ -1,9 +1,11 @@
 from copy import deepcopy
 import numpy as np
+import random
 import torch
 from torch.optim import Adam
 import gym
 import pybulletgym
+import pybullet_envs
 import time
 import spinup.algos.pytorch.ddpg.core as core
 from spinup.utils.logx import EpochLogger
@@ -21,6 +23,7 @@ class ReplayBuffer:
         self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
         self.done_buf = np.zeros(size, dtype=np.float32)
+        self.sampled_num_buf = np.zeros(size, dtype=np.float32)
         self.ptr, self.size, self.max_size = 0, 0, size
 
     def store(self, obs, act, rew, next_obs, done):
@@ -32,14 +35,55 @@ class ReplayBuffer:
         self.ptr = (self.ptr+1) % self.max_size
         self.size = min(self.size+1, self.max_size)
 
-    def sample_batch(self, batch_size=32):
-        idxs = np.random.randint(0, self.size, size=batch_size)
+    def sample_batch(self, batch_size=32, device=None, sample_type='genuine_random'):
+        # (1) pseudo_random  (2) genuine_random
+        if sample_type == 'genuine_random':
+            # sample_weights = (self.max_size - self.sampled_num_buf) / self.max_size
+
+            # 1e-6 is causes only the latest experience being sampled in a mini-batch. It's good at the beginning of
+            # the learning, but causes very slow improvement in later phase.
+            # sample_weights = 1 / (self.sampled_num_buf + 1e-1)
+            # import pdb; pdb.set_trace()
+            # 0.5 is better than 1e-6, because it give older experiences a chance to be sampled.
+            sample_weights = 1 / (self.sampled_num_buf + 0.5)
+
+            # sample_weights = 1 / (self.sampled_num_buf + 0.1)
+
+            # sample_weights = np.exp(-self.sampled_num_buf)  # Very bad performance
+
+            # Pessimistic weights: increase the sampling probability of experiences with lower reward
+            sample_weights = sample_weights + np.exp(self.rew_buf)
+
+            population_id = np.arange(self.size)
+
+            batch_size = min(batch_size, self.size)
+
+            # # With replacement
+            # idxs = random.choices(population_id, sample_weights[:self.size], k=batch_size)
+
+            # Without replacement
+            idxs = np.random.choice(population_id, size=batch_size, replace=False,
+                                    p=sample_weights[:self.size] / sample_weights[:self.size].sum())
+
+        elif sample_type == "alternate_random":
+            # TODO: alternate between genuine_random and pseudo_random to allow a balance between
+            # recent and past experiences.
+            pass
+        elif sample_type == 'pseudo_random':
+            idxs = np.random.randint(0, self.size, size=batch_size)
+
+        # Increase sampled_num by 1 and update sample_weights
+        # TODO: only update sample_weights on sampled experiences
+        # Crucial note: if sample with replace there may be experiences sample multiple times, so use for loop.
+        for i in idxs:
+            self.sampled_num_buf[i] += 1
+
         batch = dict(obs=self.obs_buf[idxs],
                      obs2=self.obs2_buf[idxs],
                      act=self.act_buf[idxs],
                      rew=self.rew_buf[idxs],
                      done=self.done_buf[idxs])
-        return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in batch.items()}
+        return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k,v in batch.items()}
 
 
 def ddpg(env_name, partially_observable=False,
@@ -158,6 +202,10 @@ def ddpg(env_name, partially_observable=False,
     ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
     ac_targ = deepcopy(ac)
 
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    ac.to(device)
+    ac_targ.to(device)
+
     # Freeze target networks with respect to optimizers (only update via polyak averaging)
     for p in ac_targ.parameters():
         p.requires_grad = False
@@ -170,7 +218,7 @@ def ddpg(env_name, partially_observable=False,
     logger.log('\nNumber of parameters: \t pi: %d, \t q: %d\n'%var_counts)
 
     # Set up function for computing DDPG Q-loss
-    def compute_loss_q(data):
+    def compute_loss_q(data, gamma_):
         o, a, r, o2, d = data['obs'], data['act'], data['rew'], data['obs2'], data['done']
 
         q = ac.q(o,a)
@@ -178,13 +226,23 @@ def ddpg(env_name, partially_observable=False,
         # Bellman backup for Q function
         with torch.no_grad():
             q_pi_targ = ac_targ.q(o2, ac_targ.pi(o2))
-            backup = r + gamma * (1 - d) * q_pi_targ
+
+            # backup = r + gamma * (1 - d) * q_pi_targ
+
+            # long_short_max = torch.max(r, q_pi_targ)
+            # long_short_min = torch.min(r, q_pi_targ)
+            # short_ratio = (r-long_short_min)/(long_short_max-long_short_min)
+            # long_ratio = (q_pi_targ - long_short_min) / (long_short_max - long_short_min)
+            # gamma_ = torch.abs(r)/(torch.abs(q_pi_targ))
+            backup = r + gamma_ * (1 - d) * q_pi_targ
+        # import pdb;
+        # pdb.set_trace()
 
         # MSE loss against Bellman backup
         loss_q = ((q - backup)**2).mean()
 
         # Useful info for logging
-        loss_info = dict(QVals=q.detach().numpy())
+        loss_info = dict(QVals=q.cpu().detach().numpy(), AdaptGamma=gamma_)
 
         return loss_q, loss_info
 
@@ -201,10 +259,10 @@ def ddpg(env_name, partially_observable=False,
     # Set up model saving
     logger.setup_pytorch_saver(ac)
 
-    def update(data):
+    def update(data, gamma_):
         # First run one gradient descent step for Q.
         q_optimizer.zero_grad()
-        loss_q, loss_info = compute_loss_q(data)
+        loss_q, loss_info = compute_loss_q(data, gamma_)
         loss_q.backward()
         q_optimizer.step()
 
@@ -235,7 +293,7 @@ def ddpg(env_name, partially_observable=False,
                 p_targ.data.add_((1 - polyak) * p.data)
 
     def get_action(o, noise_scale):
-        a = ac.act(torch.as_tensor(o, dtype=torch.float32))
+        a = ac.act(torch.as_tensor(o, dtype=torch.float32).to(device))
         a += noise_scale * np.random.randn(act_dim)
         return np.clip(a, -act_limit, act_limit)
 
@@ -270,6 +328,12 @@ def ddpg(env_name, partially_observable=False,
         ep_ret += r
         ep_len += 1
 
+        # GAMMA_MAX = 0.99
+        # GAMMA_MIN= 0.8
+        # GAMMA_DECAY_NUM = 100000
+        # gamma_ = np.minimum(GAMMA_MIN + t*(GAMMA_MAX - GAMMA_MIN)/GAMMA_DECAY_NUM, GAMMA_MAX)
+        gamma_ = gamma
+
         # Ignore the "done" signal if it comes from hitting the time
         # horizon (that is, when it's an artificial terminal signal
         # that isn't based on the agent's state)
@@ -290,8 +354,9 @@ def ddpg(env_name, partially_observable=False,
         # Update handling
         if t >= update_after and t % update_every == 0:
             for _ in range(update_every):
-                batch = replay_buffer.sample_batch(batch_size)
-                update(data=batch)
+                sample_type = 'genuine_random'  # 'pseudo_random'  genuine_random
+                batch = replay_buffer.sample_batch(batch_size, device=device, sample_type=sample_type)
+                update(data=batch, gamma_=gamma_)
 
         # End of epoch handling
         if (t+1) % steps_per_epoch == 0:
@@ -312,6 +377,7 @@ def ddpg(env_name, partially_observable=False,
             logger.log_tabular('TestEpLen', average_only=True)
             logger.log_tabular('TotalEnvInteracts', t)
             logger.log_tabular('QVals', with_min_and_max=True)
+            logger.log_tabular('AdaptGamma', with_min_and_max=True)
             logger.log_tabular('LossPi', average_only=True)
             logger.log_tabular('LossQ', average_only=True)
             logger.log_tabular('Time', time.time()-start_time)

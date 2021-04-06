@@ -11,7 +11,7 @@ from spinup.utils.logx import EpochLogger
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
 
-DEVICE = "cpu"  # "cuda" "cpu"
+DEVICE = "cuda"  # "cuda" "cpu"
 
 
 class ReplayBuffer:
@@ -245,7 +245,7 @@ def ddpg(env_name, partially_observable=False,
 
 
     ac = MLPActorCritic(obs_dim, act_dim, act_limit,
-                        critic_hidden_sizes=[256, 256], actor_hidden_sizes=[256, 256])
+                        critic_hidden_sizes=[1024, 1024], actor_hidden_sizes=[256, 256])
     ac_targ = deepcopy(ac)
     ac.to(DEVICE)
     ac_targ.to(DEVICE)
@@ -281,11 +281,12 @@ def ddpg(env_name, partially_observable=False,
 
         q_error = (q - backup)
         q_mse = (q_error ** 2).mean()
-        # loss_q = q_mse + critic_sparsity_penalty_beta * q_sparsity_penalty
+        loss_q = q_mse + critic_sparsity_penalty_beta * q_sparsity_penalty
         # loss_q = q_mse + torch.abs(q_error).mean() * critic_sparsity_penalty_beta * torch.norm(q_avg_hid_activation)
 
         # loss_q = q_mse + torch.abs(q_error).mean() * critic_sparsity_penalty_beta * q_sparsity_penalty
-        loss_q = q_mse + torch.abs(q_error).mean() * q_sparsity_penalty
+        # loss_q = q_mse + torch.abs(q_error).mean() * q_sparsity_penalty
+        # loss_q = q_mse + q_mse * critic_sparsity_penalty_beta * q_sparsity_penalty # Very bad
 
         # # absolute error weighted hidden activation
         # q_hid_activation = torch.cat(q_hid_activation, dim=1)

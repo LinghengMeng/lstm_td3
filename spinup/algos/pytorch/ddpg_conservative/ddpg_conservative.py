@@ -11,7 +11,7 @@ from spinup.utils.logx import EpochLogger
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
 
-DEVICE = "cpu"  # "cuda" "cpu"
+DEVICE = "cuda"  # "cuda" "cpu"
 
 
 class ReplayBuffer:
@@ -277,11 +277,15 @@ def ddpg(env_name, partially_observable=False,
         q_mse.backward(retain_graph=True)
         q_conservative_penalty = torch.tensor(0.0).to(DEVICE)
         for param in ac.q.parameters():
-            q_conservative_penalty += torch.norm(param.grad)
+            # q_conservative_penalty += torch.norm(param.grad)
+            q_conservative_penalty += torch.abs(param.grad).mean()
         # import pdb; pdb.set_trace()
 
-        loss_q = q_mse + torch.tensor(penalty_beta).to(DEVICE) * q_conservative_penalty
+        # loss_q = q_mse + torch.tensor(penalty_beta).to(DEVICE) * q_conservative_penalty
+        # loss_q = q_mse + torch.tensor(penalty_beta).to(DEVICE) * torch.norm(q)
+        # loss_q = q_mse + torch.tensor(penalty_beta).to(DEVICE) * torch.norm(q_error)
         # loss_q = q_mse
+        loss_q = q_mse - q_error.mean()
 
         # Useful info for logging
         loss_info = dict(QVals=q.detach().cpu().numpy(),
@@ -298,7 +302,6 @@ def ddpg(env_name, partially_observable=False,
         a_, a_hid_activation = ac.pi(o_)
         q_pi, _, _ = ac.q(o_, a_)
         expected_future_return = -q_pi.mean()
-        # loss_pi = expected_future_return + actor_sparsity_penalty_beta * a_sparsity_penalty
         loss_pi = expected_future_return
         return loss_pi
 

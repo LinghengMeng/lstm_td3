@@ -2,20 +2,16 @@ from copy import deepcopy
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.distributions.normal import Normal
-from torch.distributions.laplace import Laplace
 from torch.optim import Adam
 import gym
 import pybulletgym
 import time
-import spinup.algos.pytorch.ddpg_distribution.core as core
+import spinup.algos.pytorch.ddpg_sparse_ReLU.core as core
 from spinup.utils.logx import EpochLogger
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
 
 DEVICE = "cuda"  # "cuda" "cpu"
-LOG_STD_MAX = 10
-LOG_STD_MIN = -20
 
 
 class ReplayBuffer:
@@ -50,9 +46,9 @@ class ReplayBuffer:
 
 
 class MLPCritic(nn.Module):
-    def __init__(self, obs_dim, act_dim, hidden_sizes=[256, 256], dist_type='Normal'):
+    def __init__(self, obs_dim, act_dim, hidden_sizes=[256, 256]):
         super(MLPCritic, self).__init__()
-        self.dist_type = dist_type
+
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.layer_sizes = [obs_dim + act_dim] + hidden_sizes + [1]
@@ -62,32 +58,26 @@ class MLPCritic(nn.Module):
         for h_i in range(len(self.layer_sizes) - 2):
             self.layers += [nn.Linear(self.layer_sizes[h_i], self.layer_sizes[h_i + 1]),
                             nn.ReLU()]
-            # Note:
-            #   1. ReLU will cause very high Standard Deviation, i.e. SD explosion, with fixed_gamma=0.99.
-            #   2. ReLU will not cause SD explosion with adaptive gamma.
-            #  Conclude: Lower gamma at the beginning is helpful in alleviating SD explosion.
         # Output layer
-        self.mu_layer = nn.Linear(self.layer_sizes[-2], self.layer_sizes[-1])
-        self.log_std_layer = nn.Linear(self.layer_sizes[-2], self.layer_sizes[-1])
+        self.layers += [nn.Linear(self.layer_sizes[-2], self.layer_sizes[-1]),
+                        nn.Identity()]
+        # Output layer activations
+        self.output_layer_activation = nn.ReLU()
 
     def forward(self, obs, act):
         x = torch.cat([obs, act], dim=-1)
         hid_activation = []
         # Hidden layers
-        for h_i in range(len(self.layers)):
+        for h_i in range(len(self.layers) - 2):
             x = self.layers[h_i](x)
             # Store activation
             if h_i % 2 == 1:
                 hid_activation.append(x)
         # Output layer
-        mu = self.mu_layer(x)
-        log_std = self.log_std_layer(x)
-        log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
-        if self.dist_type == 'Normal':
-            q_distribution = Normal(torch.squeeze(mu, -1), torch.squeeze(torch.exp(log_std), -1))
-        elif self.dist_type == 'Laplace':
-            q_distribution = Laplace(torch.squeeze(mu, -1), torch.squeeze(torch.exp(log_std), -1))
-        return torch.squeeze(mu, -1), torch.squeeze(log_std, -1), q_distribution, hid_activation  # Critical to ensure q has right shape.
+        x = self.layers[-2](x)
+        out_activation = self.output_layer_activation(x)
+        x = self.layers[-1](x)
+        return torch.squeeze(x, -1), hid_activation,  hid_activation+[out_activation]# Critical to ensure q has right shape.
 
 
 class MLPActor(nn.Module):
@@ -102,7 +92,7 @@ class MLPActor(nn.Module):
         # Hidden layers
         for h_i in range(len(self.layer_sizes) - 2):
             self.layers += [nn.Linear(self.layer_sizes[h_i], self.layer_sizes[h_i + 1]),
-                            nn.Sigmoid()]
+                            nn.ReLU()]
         # Output layer
         self.layers += [nn.Linear(self.layer_sizes[-2], self.layer_sizes[-1]),
                         nn.Tanh()]
@@ -123,9 +113,9 @@ class MLPActor(nn.Module):
 
 
 class MLPActorCritic(nn.Module):
-    def __init__(self, obs_dim, act_dim, act_limit, critic_hidden_sizes=[256, 256], actor_hidden_sizes=[256, 256], dist_type='Normal'):
+    def __init__(self, obs_dim, act_dim, act_limit, critic_hidden_sizes=[256, 256], actor_hidden_sizes=[256, 256]):
         super(MLPActorCritic, self).__init__()
-        self.q = MLPCritic(obs_dim, act_dim, critic_hidden_sizes, dist_type=dist_type)
+        self.q = MLPCritic(obs_dim, act_dim, critic_hidden_sizes)
         self.pi = MLPActor(obs_dim, act_dim, act_limit, actor_hidden_sizes)
 
     def act(self, obs):
@@ -137,10 +127,12 @@ class MLPActorCritic(nn.Module):
 def ddpg(env_name, partially_observable=False,
          pomdp_type = 'remove_velocity',
          flicker_prob=0.2, random_noise_sigma=0.1, random_sensor_missing_prob=0.1,
-         dist_type = 'Normal',
-         adaptive_gamma=True, adap_gamma_beta=0.1, adap_gamma_min=0, adap_gamma_max=0.99, adap_gamma_tolerable_entropy=3,
          actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
-         steps_per_epoch=4000, epochs=100, replay_size=int(1e6), fixed_gamma=0.99,
+         critic_sparsity_penalty_beta = 0.05,  # 0.5
+         critic_sparsity_parameter_rho = 0.2,  # 0.05
+         actor_sparsity_penalty_beta = 0.0,
+         actor_sparsity_parameter_rho = 0.05,
+         steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
          target_noise=0.2, noise_clip=0.5,
          polyak=0.995, pi_lr=1e-3, q_lr=1e-3, batch_size=100, start_steps=10000, 
          update_after=1000, update_every=50, act_noise=0.1, num_test_episodes=10, 
@@ -250,14 +242,10 @@ def ddpg(env_name, partially_observable=False,
     act_limit = env.action_space.high[0]
 
     # Create actor-critic module and target networks
-    critic_sparsity_penalty_beta = 0.1  # 0.5
-    critic_sparsity_parameter_rho = 0.2  # 0.05
 
-    actor_sparsity_penalty_beta = 0.
-    actor_sparsity_parameter_rho = 0.05
 
     ac = MLPActorCritic(obs_dim, act_dim, act_limit,
-                        critic_hidden_sizes=[256, 256], actor_hidden_sizes=[256, 256], dist_type=dist_type)
+                        critic_hidden_sizes=[256, 256], actor_hidden_sizes=[256, 256])
     ac_targ = deepcopy(ac)
     ac.to(DEVICE)
     ac_targ.to(DEVICE)
@@ -273,84 +261,79 @@ def ddpg(env_name, partially_observable=False,
     var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.q])
     logger.log('\nNumber of parameters: \t pi: %d, \t q: %d\n'%var_counts)
 
-    # def calculate_adaptive_gamma(entropy, beta=0.1, gamma_min=0, gamma_max=0.99):
-    #     """Caculate adaptive gamma based on entropy of the distribution."""
-    #     entropy[entropy < 0] = 0
-    #     return torch.clamp((torch.exp(-beta * entropy) - torch.exp(beta * entropy)) / (
-    #             torch.exp(-beta * entropy) + torch.exp(beta * entropy)) + 1.0, gamma_min, gamma_max)
-    def calculate_adaptive_gamma(entropy, beta=0.1, gamma_min=0, gamma_max=0.99, tolerable_entropy=3):
-        """Caculate adaptive gamma based on entropy of the distribution."""
-        entropy[entropy < 0] = 0
-        return torch.clamp(
-            (torch.exp(-beta * (entropy - tolerable_entropy)) - torch.exp(beta * (entropy - tolerable_entropy))) / (
-                    torch.exp(-beta * (entropy - tolerable_entropy)) + torch.exp(beta * (entropy - tolerable_entropy))) + 1.0,
-            gamma_min, gamma_max)
-
     # Set up function for computing DDPG Q-loss
     def compute_loss_q(data):
         o, a, r, o2, d = data['obs'], data['act'], data['rew'], data['obs2'], data['done']
-
-        q_mu, q_log_std, q_distribution, q_hid_activation = ac.q(o, a)
-        q = q_mu
+        q, q_hid_activation, q_all_activation = ac.q(o, a)
 
         # Bellman backup for Q function
         with torch.no_grad():
             pi_targ, _ = ac_targ.pi(o2)
-            q_pi_mu_targ, q_pi_log_std_targ, q_pi_distribution_targ, _ = ac_targ.q(o2, pi_targ)
+            q_pi_targ, _, _ = ac_targ.q(o2, pi_targ)
+            backup = r + gamma * (1 - d) * q_pi_targ
 
-            q_pi_distribution_targ_entropy = q_pi_distribution_targ.entropy()
+        # import pdb;
+        # pdb.set_trace()
 
-            # Adaptive Gamma:
-            #   Note: If not use adaptive_gamma, Ant-v2 tends to be overestimating.
-            if adaptive_gamma:
-                gamma = calculate_adaptive_gamma(q_pi_distribution_targ_entropy,
-                                                 beta=adap_gamma_beta, gamma_min=adap_gamma_min,
-                                                 gamma_max=adap_gamma_max, tolerable_entropy=adap_gamma_tolerable_entropy)
-            else:
-                gamma = fixed_gamma
-            backup_mu = r + gamma * (1-d) * q_pi_mu_targ
-            backup_log_std = (1-d) * q_pi_log_std_targ
-            # Note: It's crucial to discount Standard Deviation too, otherwise high SD will be incorporated
-            #    into online critic. We can also see this as an accumulated uncertainty.
-            backup_std = gamma * torch.exp(backup_log_std)
+        # q_avg_hid_activation = torch.cat(q_hid_activation, dim=1).mean(axis=0)
+        # Only consider last layer's sparsity
+        q_avg_hid_activation = q_hid_activation[0].mean(axis=0)
 
-            if dist_type == 'Normal':
-                backup_distribution = Normal(backup_mu, backup_std)
-            elif dist_type == 'Laplace':
-                backup_distribution = Laplace(backup_mu, backup_std)
-            backup = backup_mu
+        avoid_divide_zero = torch.tensor(1e-15).to(DEVICE)
+        rho = torch.ones(q_avg_hid_activation.shape).to(DEVICE) * critic_sparsity_parameter_rho
+        # q_sparsity_penalty = torch.sum(
+        #     rho * torch.log(rho / (q_avg_hid_activation + avoid_divide_zero)) + (1 - rho) * torch.log(
+        #         (1 - rho) / (1 - q_avg_hid_activation + avoid_divide_zero)))
+        q_sparsity_penalty = torch.sum(
+            torch.log(q_avg_hid_activation + avoid_divide_zero) - torch.log(rho + avoid_divide_zero) + rho / (
+                    q_avg_hid_activation + avoid_divide_zero) - 1)
 
-        kl_loss = torch.diag(torch.distributions.kl.kl_divergence(backup_distribution, q_distribution)).mean()
         q_error = (q - backup)
-        q_mse = (q_error**2).mean()
-        # loss_q = kl_loss + q_log_std.mean()  # Not work for ReLU
-        # loss_q = kl_loss + torch.exp(q_log_std).mean()    # Not good for ReLU, because this will make both Mu and Std increase.
-        # loss_q = kl_loss + 1e-5*q_distribution.entropy().mean()
-        # loss_q = kl_loss
-        # Note: KL-Divergence can be minimized just by increase standard deviation, if not optimize the MSE of mu.
-        loss_q = q_mse + 1e-2*kl_loss
-        # loss_q = q_mse + 0.5*kl_loss + 0.01 * q_log_std.mean()
-        # loss_q = q_mse + torch.abs(q_error).mean()*kl_loss + q_log_std.mean()
+        q_mse = (q_error ** 2).mean()
+        loss_q = q_mse + critic_sparsity_penalty_beta * q_sparsity_penalty
+        # loss_q = q_mse + torch.abs(q_error).mean() * critic_sparsity_penalty_beta * torch.norm(q_avg_hid_activation)
+
+        # loss_q = q_mse + torch.abs(q_error).mean() * critic_sparsity_penalty_beta * q_sparsity_penalty
+        # loss_q = q_mse + torch.abs(q_error).mean() * q_sparsity_penalty
+        # loss_q = q_mse + q_mse * critic_sparsity_penalty_beta * q_sparsity_penalty # Very bad
         # loss_q = q_mse
+        # print(q_sparsity_penalty)
         # import pdb; pdb.set_trace()
+
+        # # absolute error weighted hidden activation
+        # q_hid_activation = torch.cat(q_hid_activation, dim=1)
+        # q_error = (q - backup)
+        #
+        # q_avg_hid_activation = (
+        #         (torch.abs(q_error) / torch.abs(q_error).sum()).reshape(-1, 1).repeat(1, q_hid_activation.shape[
+        #             1]) * q_hid_activation).sum(axis=0)
+        # rho = torch.ones(q_avg_hid_activation.shape).to(DEVICE) * critic_sparsity_parameter_rho
+        # q_sparsity_penalty = torch.sum(
+        #     rho * torch.log(rho / q_avg_hid_activation) + (1 - rho) * torch.log((1 - rho) / (1 - q_avg_hid_activation)))
+        # q_error = (q - backup)
+        # q_mse = (q_error ** 2).mean()
+        # loss_q = q_mse + critic_sparsity_penalty_beta * q_sparsity_penalty
+        # # import pdb; pdb.set_trace()
+
+        # q_avg_all_activation = torch.cat(q_all_activation, dim=1).mean(axis=0)
+        # avoid_divide_zero = torch.tensor(1e-15).to(DEVICE)
+        # rho = torch.ones(q_avg_all_activation.shape).to(DEVICE) * critic_sparsity_parameter_rho
+        # q_sparsity_penalty = torch.sum(
+        #     rho * torch.log(rho / (q_avg_all_activation + avoid_divide_zero)) + (1 - rho) * torch.log(
+        #         (1 - rho) / (1 - q_avg_all_activation + avoid_divide_zero)))
+        # import pdb; pdb.set_trace()
+
+        # q_error = (q - backup)
+        # q_mse = (q_error**2).mean()
+        # loss_q = q_mse + torch.abs(q_error).mean()*critic_sparsity_penalty_beta * q_sparsity_penalty
 
 
         # Useful info for logging
-        if adaptive_gamma:
-            gamma_vals = gamma.detach().cpu().numpy()
-        else:
-            gamma_vals = gamma
-        loss_info = dict(QMuVals=q_mu.detach().cpu().numpy(),
-                         QStdVals=(gamma * torch.exp(q_log_std)).detach().cpu().numpy(),
-                         QLogStdVals=q_log_std.detach().cpu().numpy(),
+        loss_info = dict(QVals=q.detach().cpu().numpy(),
                          QHidActivation=torch.cat(q_hid_activation, dim=1).detach().cpu().numpy(),
+                         QSparsityPenalty=q_sparsity_penalty.detach().cpu().numpy(),
                          QMSE=q_mse.detach().cpu().numpy(),
-                         QError=q_error.detach().cpu().numpy(),
-                         QEntropy=q_distribution.entropy().detach().cpu().numpy(),
-                         QKLDiv=kl_loss.detach().cpu().numpy(),
-                         RVals=r.detach().cpu().numpy(),
-                         Gamma=gamma_vals,
-                         Entropy=q_pi_distribution_targ_entropy.detach().cpu().numpy())
+                         QError=q_error.detach().cpu().numpy())
 
         return loss_q, loss_info
 
@@ -358,11 +341,10 @@ def ddpg(env_name, partially_observable=False,
     def compute_loss_pi(data):
         o_ = data['obs']
         a_, a_hid_activation = ac.pi(o_)
-        q_pi_mu, q_pi_log_std, q_pi_distribution, _ = ac.q(o_, a_)
-        # loss_pi = -q_pi_mu.mean() - q_pi_log_std.mean()
-        # loss_pi = -q_pi_mu.mean() - torch.exp(q_pi_log_std).mean() # Bad choice
-        loss_pi = -q_pi_mu.mean() - q_pi_distribution.entropy().mean()
-        # loss_pi = -q_pi_mu.mean()    # Maximum expectation
+        q_pi, _, _ = ac.q(o_, a_)
+
+        expected_future_return = -q_pi.mean()
+        loss_pi = expected_future_return
         return loss_pi
 
     # Set up optimizers for policy and q-function
@@ -374,8 +356,9 @@ def ddpg(env_name, partially_observable=False,
 
     def update(data):
         # First run one gradient descent step for Q.
-        q_optimizer.zero_grad()
+
         loss_q, loss_info = compute_loss_q(data)
+        q_optimizer.zero_grad()
         loss_q.backward()
         q_optimizer.step()
 
@@ -483,17 +466,11 @@ def ddpg(env_name, partially_observable=False,
             logger.log_tabular('EpLen', average_only=True)
             logger.log_tabular('TestEpLen', average_only=True)
             logger.log_tabular('TotalEnvInteracts', t)
-            logger.log_tabular('QMuVals', with_min_and_max=True)
-            logger.log_tabular('QStdVals', with_min_and_max=True)
-            logger.log_tabular('QLogStdVals', with_min_and_max=True)
+            logger.log_tabular('QVals', with_min_and_max=True)
             logger.log_tabular('QHidActivation', with_min_and_max=True)
+            logger.log_tabular('QSparsityPenalty', with_min_and_max=True)
             logger.log_tabular('QMSE', with_min_and_max=True)
             logger.log_tabular('QError', with_min_and_max=True)
-            logger.log_tabular('QEntropy', with_min_and_max=True)
-            logger.log_tabular('QKLDiv', with_min_and_max=True)
-            logger.log_tabular('RVals', with_min_and_max=True)
-            logger.log_tabular('Gamma', with_min_and_max=True)
-            logger.log_tabular('Entropy', with_min_and_max=True)
             logger.log_tabular('LossPi', average_only=True)
             logger.log_tabular('LossQ', average_only=True)
             logger.log_tabular('Time', time.time()-start_time)
@@ -515,7 +492,7 @@ def str2bool(v):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--env', type=str, default='Ant-v2')
     parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
     parser.add_argument('--pomdp_type',
                         choices=['remove_velocity', 'flickering', 'random_noise', 'random_sensor_missing',
@@ -526,15 +503,13 @@ if __name__ == '__main__':
     parser.add_argument('--flicker_prob', type=float, default=0.2)
     parser.add_argument('--random_noise_sigma', type=float, default=0.1)
     parser.add_argument('--random_sensor_missing_prob', type=float, default=0.1)
-    parser.add_argument('--dist_type', choices=['Normal', 'Laplace'], default='Normal')
-    parser.add_argument('--adaptive_gamma', type=str2bool, nargs='?', const=True, default=True, help="Use adaptive gamma")
-    parser.add_argument('--adap_gamma_beta', type=float, default=0.1)
-    parser.add_argument('--adap_gamma_min', type=float, default=0)
-    parser.add_argument('--adap_gamma_max', type=float, default=0.99)
-    parser.add_argument('--adap_gamma_tolerable_entropy', type=float, default=3)
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2)
-    parser.add_argument('--fixed_gamma', type=float, default=0.99)
+    parser.add_argument('--critic_sparsity_penalty_beta', type=float, default=0.05)
+    parser.add_argument('--critic_sparsity_parameter_rho', type=float, default=0.2)
+    parser.add_argument('--actor_sparsity_penalty_beta', type=float, default=0.0)
+    parser.add_argument('--actor_sparsity_parameter_rho', type=float, default=0.05)
+    parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--exp_name', type=str, default='ddpg')
@@ -553,13 +528,11 @@ if __name__ == '__main__':
          flicker_prob=args.flicker_prob,
          random_noise_sigma=args.random_noise_sigma,
          random_sensor_missing_prob=args.random_sensor_missing_prob,
-         dist_type=args.dist_type,
-         adaptive_gamma=args.adaptive_gamma,
-         adap_gamma_beta=args.adap_gamma_beta,
-         adap_gamma_min=args.adap_gamma_min,
-         adap_gamma_max=args.adap_gamma_max,
-         adap_gamma_tolerable_entropy=args.adap_gamma_tolerable_entropy,
          actor_critic=core.MLPActorCritic,
-         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), 
-         fixed_gamma=args.fixed_gamma, seed=args.seed, epochs=args.epochs,
+         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l),
+         critic_sparsity_penalty_beta=args.critic_sparsity_penalty_beta,
+         critic_sparsity_parameter_rho=args.critic_sparsity_parameter_rho,
+         actor_sparsity_penalty_beta=args.actor_sparsity_penalty_beta,
+         actor_sparsity_parameter_rho=args.actor_sparsity_parameter_rho,
+         gamma=args.gamma, seed=args.seed, epochs=args.epochs,
          logger_kwargs=logger_kwargs)

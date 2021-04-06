@@ -53,10 +53,10 @@ class MLPActorCritic(nn.Module):
         act_limit = action_space.high[0]
 
         # build policy and value functions
-        self.pi = MLPActor(obs_dim, act_dim, hidden_sizes, activation, act_limit)
-        self.q1 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation)
-        self.q2 = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation)
+        self.pi = MLPActor(obs_dim, act_dim, hidden_sizes, nn.Sigmoid, act_limit)
+        self.q1 = MLPQFunction(obs_dim, act_dim, hidden_sizes, nn.Sigmoid)
+        self.q2 = MLPQFunction(obs_dim, act_dim, hidden_sizes, nn.Sigmoid)
 
     def act(self, obs):
         with torch.no_grad():
-            return self.pi(obs).cpu().numpy()
+            return self.pi(obs).numpy()

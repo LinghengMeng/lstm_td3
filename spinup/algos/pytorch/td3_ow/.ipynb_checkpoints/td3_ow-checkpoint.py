@@ -1,14 +1,12 @@
 from copy import deepcopy
 import itertools
 import numpy as np
-import random
 import torch
 from torch.optim import Adam
 import gym
 import pybulletgym
-import pybullet_envs
 import time
-import spinup.algos.pytorch.td3.core as core
+import spinup.algos.pytorch.td3_ow.core as core
 from spinup.utils.logx import EpochLogger
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
@@ -20,12 +18,13 @@ class ReplayBuffer:
     """
 
     def __init__(self, obs_dim, act_dim, size):
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
         self.obs_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
         self.obs2_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
         self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
         self.done_buf = np.zeros(size, dtype=np.float32)
-        self.sampled_num_buf = np.zeros(size, dtype=np.float32)
         self.ptr, self.size, self.max_size = 0, 0, size
 
     def store(self, obs, act, rew, next_obs, done):
@@ -34,68 +33,58 @@ class ReplayBuffer:
         self.act_buf[self.ptr] = act
         self.rew_buf[self.ptr] = rew
         self.done_buf[self.ptr] = done
-        self.sampled_num_buf[self.ptr] = 0
         self.ptr = (self.ptr+1) % self.max_size
         self.size = min(self.size+1, self.max_size)
 
-    def sample_batch(self, batch_size=32, device=None, sample_type='genuine_random'):
-        # (1) pseudo_random  (2) genuine_random
-        if sample_type == 'genuine_random':
-            # sample_weights = (self.max_size - self.sampled_num_buf) / self.max_size
-
-            # 1e-6 is causes only the latest experience being sampled in a mini-batch. It's good at the beginning of
-            # the learning, but causes very slow improvement in later phase.
-            sample_weights = 1 / (self.sampled_num_buf + 1e-1)
-
-            # 0.5 is better than 1e-6, because it give older experiences a chance to be sampled.
-            # sample_weights = 1 / (self.sampled_num_buf + 0.5)
-
-            # sample_weights = 1 / (self.sampled_num_buf + 0.1)
-
-            # sample_weights = np.exp(-self.sampled_num_buf)  # Very bad performance
-            population_id = np.arange(self.size)
-
-            batch_size = min(batch_size, self.size)
-
-            # # With replacement
-            # idxs = random.choices(population_id, sample_weights[:self.size], k=batch_size)
-
-            # Without replacement
-            idxs = np.random.choice(population_id, size=batch_size, replace=False,
-                                    p=sample_weights[:self.size] / sample_weights[:self.size].sum())
-
-        elif sample_type == "alternate_random":
-            # TODO: alternate between genuine_random and pseudo_random to allow a balance between
-            # recent and past experiences.
-            pass
-        elif sample_type == 'pseudo_random':
-            idxs = np.random.randint(0, self.size, size=batch_size)
-
-        # Increase sampled_num by 1 and update sample_weights
-        # TODO: only update sample_weights on sampled experiences
-        # Crucial note: if sample with replace there may be experiences sample multiple times, so use for loop.
-        for i in idxs:
-            self.sampled_num_buf[i] += 1
-
+    def sample_batch(self, batch_size=32):
+        idxs = np.random.randint(0, self.size, size=batch_size)
         batch = dict(obs=self.obs_buf[idxs],
                      obs2=self.obs2_buf[idxs],
                      act=self.act_buf[idxs],
                      rew=self.rew_buf[idxs],
                      done=self.done_buf[idxs])
-        return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k,v in batch.items()}
+        return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in batch.items()}
+
+    def sample_batch_ow(self, batch_size=32, observation_window_size=5):
+        """
+        Sample observation within a window
+        """
+        idxs = np.random.randint(observation_window_size-1, self.size, size=batch_size)
+ 
+        ow_obs = np.zeros([batch_size, observation_window_size, self.obs_dim])
+        ow_obs2 = np.zeros([batch_size, observation_window_size, self.obs_dim])
+        ow_act = np.zeros([batch_size, observation_window_size, self.act_dim])
+        ow_rew = np.zeros([batch_size, observation_window_size])
+        ow_done = np.zeros([batch_size, observation_window_size])
+        for i in range(observation_window_size):
+            ow_obs[:, -1-i, :] = self.obs_buf[idxs-i, :]
+            ow_obs2[:, -1-i, :] = self.obs2_buf[idxs-i, :]
+            ow_done[:, -1-i] = self.done_buf[idxs-i]
+        # If there is a done in the observation window that is not the last one, then set all observations before that to 0.
+        x_idxs, y_idxs = np.where(ow_done[:, :-1]==1)
+        for i, x in enumerate(x_idxs):
+            y = y_idxs[i]
+            for pre_y in range(0, y+1):
+                ow_obs[x, pre_y] = np.zeros([self.obs_dim])
+                ow_obs2[x, pre_y] = np.zeros([self.obs_dim])
+        # Construct batch data
+        batch = dict(obs=ow_obs.reshape([batch_size, -1]),    # concatenate observations in the window
+                     obs2=ow_obs2.reshape([batch_size, -1]),  # concatenate observations in the window
+                     act=self.act_buf[idxs],
+                     rew=self.rew_buf[idxs],
+                     done=self.done_buf[idxs])
+        return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in batch.items()}
 
 
-def td3(env_name, partially_observable=False,
-        pomdp_type = 'remove_velocity',
-        flicker_prob=0.2, random_noise_sigma=0.1, random_sensor_missing_prob=0.1,
-        actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
-        steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99, 
-        polyak=0.995, pi_lr=1e-3, q_lr=1e-3, batch_size=100, start_steps=10000, 
-        update_after=1000, update_every=50, act_noise=0.1, target_noise=0.2, 
-        noise_clip=0.5, policy_delay=2, num_test_episodes=10, max_ep_len=1000, 
-        logger_kwargs=dict(), save_freq=1):
+def td3_ow(env_name, partially_observable=False, observation_window_size=5,
+           actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
+           steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
+           polyak=0.995, pi_lr=1e-3, q_lr=1e-3, batch_size=100, start_steps=10000,
+           update_after=1000, update_every=50, act_noise=0.1, target_noise=0.2,
+           noise_clip=0.5, policy_delay=2, num_test_episodes=10, max_ep_len=1000,
+           logger_kwargs=dict(), save_freq=1):
     """
-    Twin Delayed Deep Deterministic Policy Gradient (TD3)
+    Twin Delayed Deep Deterministic Policy Gradient with Observation Window (TD3-OW)
 
 
     Args:
@@ -103,6 +92,8 @@ def td3(env_name, partially_observable=False,
             The environment must satisfy the OpenAI Gym API.
 
         partially_observable:
+
+        observation_window_size:
 
         actor_critic: The constructor method for a PyTorch Module with an ``act`` 
             method, a ``pi`` module, a ``q1`` module, and a ``q2`` module.
@@ -202,8 +193,7 @@ def td3(env_name, partially_observable=False,
 
     # Wrapper environment if using POMDP
     if partially_observable:
-        env = POMDPWrapper(env_name, pomdp_type, flicker_prob, random_noise_sigma, random_sensor_missing_prob)
-        test_env = POMDPWrapper(env_name, pomdp_type, flicker_prob, random_noise_sigma, random_sensor_missing_prob)
+        env, test_env = POMDPWrapper(env_name), POMDPWrapper(env_name)
     else:
         env, test_env = gym.make(env_name), gym.make(env_name)
     obs_dim = env.observation_space.shape[0]
@@ -211,14 +201,10 @@ def td3(env_name, partially_observable=False,
 
     # Action limit for clamping: critically, assumes all dimensions share the same bound!
     act_limit = env.action_space.high[0]
-
+    
     # Create actor-critic module and target networks
-    ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
+    ac = actor_critic(env.observation_space, observation_window_size, env.action_space, **ac_kwargs)
     ac_targ = deepcopy(ac)
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    ac.to(device)
-    ac_targ.to(device)
 
     # Freeze target networks with respect to optimizers (only update via polyak averaging)
     for p in ac_targ.parameters():
@@ -263,8 +249,8 @@ def td3(env_name, partially_observable=False,
         loss_q = loss_q1 + loss_q2
 
         # Useful info for logging
-        loss_info = dict(Q1Vals=q1.cpu().detach().numpy(),
-                         Q2Vals=q2.cpu().detach().numpy())
+        loss_info = dict(Q1Vals=q1.detach().numpy(),
+                         Q2Vals=q2.detach().numpy())
 
         return loss_q, loss_info
 
@@ -321,16 +307,20 @@ def td3(env_name, partially_observable=False,
                     p_targ.data.add_((1 - polyak) * p.data)
 
     def get_action(o, noise_scale):
-        a = ac.act(torch.as_tensor(o, dtype=torch.float32).to(device))
+        a = ac.act(torch.as_tensor(o, dtype=torch.float32))
         a += noise_scale * np.random.randn(act_dim)
         return np.clip(a, -act_limit, act_limit)
 
     def test_agent():
         for j in range(num_test_episodes):
             o, d, ep_ret, ep_len = test_env.reset(), False, 0, 0
+            ow_o = np.zeros([int(observation_window_size*obs_dim)])
+            ow_o[-obs_dim:] = o
             while not(d or (ep_len == max_ep_len)):
                 # Take deterministic actions at test time (noise_scale=0)
-                o, r, d, _ = test_env.step(get_action(o, 0))
+                o, r, d, _ = test_env.step(get_action(ow_o, 0))
+                ow_o[:-obs_dim] = ow_o[obs_dim:]
+                ow_o[-obs_dim:] = o
                 ep_ret += r
                 ep_len += 1
             logger.store(TestEpRet=ep_ret, TestEpLen=ep_len)
@@ -339,7 +329,10 @@ def td3(env_name, partially_observable=False,
     total_steps = steps_per_epoch * epochs
     start_time = time.time()
     o, ep_ret, ep_len = env.reset(), 0, 0
-
+    
+    ow_o = np.zeros([int(observation_window_size*obs_dim)])
+    ow_o[-obs_dim:] = o
+    
     # Main loop: collect experience in env and update/log each epoch
     for t in range(total_steps):
         
@@ -347,7 +340,7 @@ def td3(env_name, partially_observable=False,
         # from a uniform distribution for better exploration. Afterwards, 
         # use the learned policy (with some noise, via act_noise). 
         if t > start_steps:
-            a = get_action(o, act_noise)
+            a = get_action(ow_o, act_noise)
         else:
             a = env.action_space.sample()
 
@@ -367,17 +360,21 @@ def td3(env_name, partially_observable=False,
         # Super critical, easy to overlook step: make sure to update 
         # most recent observation!
         o = o2
+        ow_o[:-obs_dim] = ow_o[obs_dim:]
+        ow_o[-obs_dim:] = o
 
         # End of trajectory handling
         if d or (ep_len == max_ep_len):
             logger.store(EpRet=ep_ret, EpLen=ep_len)
             o, ep_ret, ep_len = env.reset(), 0, 0
+            ow_o = np.zeros([int(observation_window_size*obs_dim)])
+            ow_o[-obs_dim:] = o
 
         # Update handling
         if t >= update_after and t % update_every == 0:
             for j in range(update_every):
-                sample_type = 'genuine_random'  # 'pseudo_random'  genuine_random
-                batch = replay_buffer.sample_batch(batch_size, device=device, sample_type=sample_type)
+                # batch = replay_buffer.sample_batch(batch_size)
+                batch = replay_buffer.sample_batch_ow(batch_size, observation_window_size)
                 update(data=batch, timer=j)
 
         # End of epoch handling
@@ -417,44 +414,35 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
-
+        
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
-    parser.add_argument('--pomdp_type',
-                        choices=['remove_velocity', 'flickering', 'random_noise', 'random_sensor_missing',
-                                 'remove_velocity_and_flickering', 'remove_velocity_and_random_noise',
-                                 'remove_velocity_and_random_sensor_missing', 'flickering_and_random_noise',
-                                 'random_noise_and_random_sensor_missing', 'random_sensor_missing_and_random_noise'],
-                        default='remove_velocity')
-    parser.add_argument('--flicker_prob', type=float, default=0.2)
-    parser.add_argument('--random_noise_sigma', type=float, default=0.1)
-    parser.add_argument('--random_sensor_missing_prob', type=float, default=0.1)
+    parser.add_argument('--observation_window_size', type=int, default=5)
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--exp_name', type=str, default='td3')
-    parser.add_argument("--data_dir", type=str, default='spinup_data_lstm')
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--exp_name', type=str, default='td3_ow')
+    parser.add_argument("--data_dir", type=str, default='spinup_data_td3_ow')
     args = parser.parse_args()
 
-    # Set log data saving directory
-    from spinup.utils.run_utils import setup_logger_kwargs
 
-    data_dir = osp.join(
-        osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
-        args.data_dir)
-    logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
+# Set log data saving directory
+from spinup.utils.run_utils import setup_logger_kwargs
 
-    td3(env_name=args.env, partially_observable=args.partially_observable,
-        pomdp_type=args.pomdp_type,
-        flicker_prob=args.flicker_prob,
-        random_noise_sigma=args.random_noise_sigma,
-        random_sensor_missing_prob=args.random_sensor_missing_prob,
-        actor_critic=core.MLPActorCritic,
-        ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), 
-        gamma=args.gamma, seed=args.seed, epochs=args.epochs,
-        logger_kwargs=logger_kwargs)
+data_dir = osp.join(
+    osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
+    args.data_dir)
+logger_kwargs = setup_logger_kwargs(args['exp_name'], args['seed'], data_dir, datestamp=True)
+
+td3_ow(env_name=args.env, partially_observable=args.partially_observable,
+       observation_window_size=args.observation_window_size,
+       actor_critic=core.MLPActorCritic,
+       ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), 
+       gamma=args.gamma, seed=args.seed, epochs=args.epochs,
+       logger_kwargs=logger_kwargs)
+

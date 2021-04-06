@@ -44,11 +44,14 @@ class MLPQFunction(nn.Module):
 
 class MLPActorCritic(nn.Module):
 
-    def __init__(self, observation_space, action_space, hidden_sizes=(256,256),
+    def __init__(self, observation_space, observation_window_size, add_past_action,
+                 action_space, hidden_sizes=(256,256),
                  activation=nn.ReLU):
         super().__init__()
-
-        obs_dim = observation_space.shape[0]
+        if add_past_action:
+            obs_dim = int(observation_space.shape[0] * observation_window_size+action_space.shape[0]*(observation_window_size-1))
+        else:
+            obs_dim = int(observation_space.shape[0] * observation_window_size)
         act_dim = action_space.shape[0]
         act_limit = action_space.high[0]
 
@@ -59,4 +62,4 @@ class MLPActorCritic(nn.Module):
 
     def act(self, obs):
         with torch.no_grad():
-            return self.pi(obs).cpu().numpy()
+            return self.pi(obs).numpy()
