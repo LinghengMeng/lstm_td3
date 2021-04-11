@@ -31,6 +31,7 @@ class ReplayBuffer:
         self.pred_q_buf = {i: [] for i in range(size)}
         self.targ_q_buf = {i: [] for i in range(size)}
         self.targ_next_q_buf = {i: [] for i in range(size)}
+        self.sampled_time_buf = {i: [] for i in range(size)}    # indicate when the sample is sampled
 
     def store(self, obs, act, rew, next_obs, done):
         self.obs_buf[self.ptr] = obs
@@ -41,12 +42,13 @@ class ReplayBuffer:
         self.ptr = (self.ptr+1) % self.max_size
         self.size = min(self.size+1, self.max_size)
 
-    def add_sample_hist(self, sample_idxs, pred_q, targ_q, targ_next_q):
+    def add_sample_hist(self, sample_idxs, pred_q, targ_q, targ_next_q, t):
         """Add prediction history."""
         for i in range(len(sample_idxs)):
             self.pred_q_buf[sample_idxs[i]].append(pred_q[i])
             self.targ_q_buf[sample_idxs[i]].append(targ_q[i])
             self.targ_next_q_buf[sample_idxs[i]].append(targ_next_q[i])
+            self.sampled_time_buf[sample_idxs[i]].append(t)
 
     def sample_batch(self, batch_size=32, device=None, sample_type='genuine_random'):
         # (1) pseudo_random  (2) genuine_random
@@ -66,7 +68,7 @@ class ReplayBuffer:
 
             # Pessimistic weights: increase the sampling probability of experiences with lower reward
             # Optimistic weights: increase the sampling probability of experiences with higher reward
-            # sample_weights = sample_weights + np.exp(self.rew_buf)
+            sample_weights = sample_weights + np.exp(self.rew_buf)
             # sample_weights = np.exp(self.rew_buf)
 
             population_id = np.arange(self.size)
@@ -101,7 +103,8 @@ class ReplayBuffer:
                      )
         batch_hist = dict(pred_q_hist=[self.pred_q_buf[i] for i in idxs],
                           targ_q_hist=[self.targ_q_buf[i] for i in idxs],
-                          targ_next_q_hist=[self.targ_next_q_buf[i] for i in idxs])
+                          targ_next_q_hist=[self.targ_next_q_buf[i] for i in idxs],
+                          sampled_time_hist=[self.sampled_time_buf[i] for i in idxs])
         return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch.items()}, batch_hist, idxs
 
 
@@ -237,12 +240,13 @@ def ddpg(env_name, partially_observable=False,
     logger.log('\nNumber of parameters: \t pi: %d, \t q: %d\n'%var_counts)
 
     # Set up function for computing DDPG Q-loss
-    def compute_loss_q(data, batch_hist):
+    def compute_loss_q(data, batch_hist, t):
         o, a, r, o2, d = data['obs'], data['act'], data['rew'], data['obs2'], data['done']
 
         # batch_hist['pred_q_hist']
         # batch_hist['targ_q_hist']
         # batch_hist['targ_next_q_hist']
+        # batch_hist['sampled_time_hist']
 
 
         q = ac.q(o,a)
@@ -251,14 +255,54 @@ def ddpg(env_name, partially_observable=False,
         with torch.no_grad():
             q_pi_targ = ac_targ.q(o2, ac_targ.pi(o2))
             # Average over historically predicted q-values
-            window_size = 3
+            window_size = 10
             mean_targ_next_q_hist = []
             for i in range(len(batch_hist['targ_next_q_hist'])):
+                # ############################################################################################
+                # # # Add 0 if not exist history
+                # # # Note: rather than init with 0 init with reward of next reward?
+                # # if not batch_hist['targ_next_q_hist'][i]:
+                # #     batch_hist['targ_next_q_hist'][i].append(0)
+                #     # import pdb; pdb.set_trace()
+                # batch_hist['targ_next_q_hist'][i].append(q_pi_targ[i].item())
+                # tmp_window_size = min(window_size, len(batch_hist['targ_next_q_hist'][i]))
+                # agv_window = np.asarray(batch_hist['targ_next_q_hist'][i])[-tmp_window_size:].mean()
+                # # agv_window = np.asarray(batch_hist['targ_next_q_hist'][i])[-tmp_window_size:].min()
+                # mean_targ_next_q_hist.append(agv_window)
+                # ############################################################################################
+                # # Add current prediction
+                # batch_hist['targ_next_q_hist'][i].append(q_pi_targ[i].item())
+                # batch_hist['sampled_time_hist'][i].append(t)
+                # if window_size is not None:
+                #     tmp_window_size = min(window_size, len(batch_hist['targ_next_q_hist'][i]))
+                # else:
+                #     tmp_window_size = len(batch_hist['targ_next_q_hist'][i])
+                # weight = np.asarray(batch_hist['sampled_time_hist'][i])[-tmp_window_size:] / np.asarray(batch_hist['sampled_time_hist'][i])[-tmp_window_size:].sum()
+                # agv_window = (weight * np.asarray(batch_hist['targ_next_q_hist'][i])[-tmp_window_size:]).sum()
+                # mean_targ_next_q_hist.append(agv_window)
+                ################################################################################################
                 batch_hist['targ_next_q_hist'][i].append(q_pi_targ[i].item())
-                tmp_window_size = min(window_size, len(batch_hist['targ_next_q_hist'][i]))
-                agv_window = np.asarray(batch_hist['targ_next_q_hist'][i])[-tmp_window_size:].mean()
-                mean_targ_next_q_hist.append(agv_window)
-                # mean_targ_next_q_hist.append(np.mean(batch_hist['targ_next_q_hist'][i]))
+                targ_next_q_hist = np.asarray(batch_hist['targ_next_q_hist'][i])
+                change_rate = targ_next_q_hist[1:] - targ_next_q_hist[:-1]
+                if len(targ_next_q_hist)==1:
+                    avg_window = batch_hist['targ_next_q_hist'][i][-1]
+                else:
+                    threshold = 0.001  # thresold=1 works for HalfCheetahBulletEnv-v0
+                    # if np.abs(change_rate[-1]) > threshold:
+                    if change_rate[-1] > threshold:
+                        # if np.sign(change_rate[-1]) == 1:
+                        #     avg_window = batch_hist['targ_next_q_hist'][i][-2] + np.sign(
+                        #         batch_hist['targ_next_q_hist'][i][-1]) * threshold
+                        # else:
+                        #     avg_window = batch_hist['targ_next_q_hist'][i][-2]+10*np.sign(batch_hist['targ_next_q_hist'][i][-1])*threshold
+                        avg_window = batch_hist['targ_next_q_hist'][i][-2]
+                    else:
+                        avg_window = batch_hist['targ_next_q_hist'][i][-1]
+                    # import pdb; pdb.set_trace()
+                mean_targ_next_q_hist.append(avg_window)
+            # if t>2000:
+            #     import pdb; pdb.set_trace()
+
             avg_q_pi_targ = torch.as_tensor(mean_targ_next_q_hist, dtype=torch.float32).to(device)
             backup = r + gamma * (1 - d) * avg_q_pi_targ
             # backup = r + gamma * (1 - d) * q_pi_targ
@@ -286,10 +330,10 @@ def ddpg(env_name, partially_observable=False,
     # Set up model saving
     logger.setup_pytorch_saver(ac)
 
-    def update(data, batch_hist):
+    def update(data, batch_hist, t):
         # First run one gradient descent step for Q.
         q_optimizer.zero_grad()
-        loss_q, loss_info, q, backup, q_pi_targ = compute_loss_q(data, batch_hist)
+        loss_q, loss_info, q, backup, q_pi_targ = compute_loss_q(data, batch_hist, t)
         loss_q.backward()
         q_optimizer.step()
 
@@ -382,10 +426,10 @@ def ddpg(env_name, partially_observable=False,
         # Update handling
         if t >= update_after and t % update_every == 0:
             for _ in range(update_every):
-                sample_type = 'pseudo_random'  # 'pseudo_random'  genuine_random
+                sample_type = 'genuine_random'  # 'pseudo_random'  genuine_random
                 batch, batch_hist, batch_idxs = replay_buffer.sample_batch(batch_size, device=device, sample_type=sample_type)
-                q, backup, q_pi_targ = update(data=batch, batch_hist=batch_hist)
-                replay_buffer.add_sample_hist(batch_idxs, q, backup, q_pi_targ)
+                q, backup, q_pi_targ = update(data=batch, batch_hist=batch_hist, t=t)
+                replay_buffer.add_sample_hist(batch_idxs, q, backup, q_pi_targ, t)
 
         # End of epoch handling
         if (t+1) % steps_per_epoch == 0:
@@ -397,9 +441,9 @@ def ddpg(env_name, partially_observable=False,
             context_fname = 'checkpoint-context-' + (
                 'Step-%d' % t if t is not None else '') + '.pt'
             context_fname = osp.join(fpath, context_fname)
-            if (epoch % save_freq == 0) or (epoch == epochs):
-                logger.save_state({'env': env}, None)
-                torch.save({'replay_buffer': replay_buffer}, context_fname)
+            # if (epoch % save_freq == 0) or (epoch == epochs):
+            #     logger.save_state({'env': env}, None)
+            #     torch.save({'replay_buffer': replay_buffer}, context_fname)
 
             # Test the performance of the deterministic version of the agent.
             test_agent()
@@ -456,12 +500,12 @@ if __name__ == '__main__':
 
     # Set log data saving directory
     from spinup.utils.run_utils import setup_logger_kwargs
-    # data_dir = osp.join(
-    #     osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
-    #     args.data_dir)
     data_dir = osp.join(
-        osp.dirname("D:\spinup_new_data"),
+        osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
         args.data_dir)
+    # data_dir = osp.join(
+    #     osp.dirname("D:\spinup_new_data"),
+    #     args.data_dir)
 
     # import pdb; pdb.set_trace()
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
