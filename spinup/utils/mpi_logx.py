@@ -14,6 +14,7 @@ import tensorflow as tf
 import torch
 import os.path as osp, time, atexit, os
 import warnings
+from spinup.utils.mpi_tools import proc_id, mpi_statistics_scalar
 from spinup.utils.serialization_utils import convert_json
 
 color2num = dict(
@@ -68,32 +69,6 @@ def restore_tf_graph(sess, fpath):
     model.update({k: graph.get_tensor_by_name(v) for k,v in model_info['outputs'].items()})
     return model
 
-
-def statistics_scalar(x, with_min_and_max=False):
-    """
-    Get mean/std and optional min/max of scalar x across MPI processes.
-
-    Args:
-        x: An array containing samples of the scalar to produce statistics
-            for.
-
-        with_min_and_max (bool): If true, return min and max of x in
-            addition to mean and std.
-    """
-    x = np.array(x, dtype=np.float32)
-    global_sum, global_n = x.sum(), len(x)
-    mean = global_sum / global_n
-
-    global_sum_sq = np.sum((x - mean)**2)
-    std = np.sqrt(global_sum_sq / global_n)  # compute global std
-
-    if with_min_and_max:
-        global_min = np.min(x) if len(x) > 0 else np.inf
-        global_max = np.max(x) if len(x) > 0 else -np.inf
-        return mean, std, global_min, global_max
-    return mean, std
-
-
 class Logger:
     """
     A general-purpose logger.
@@ -121,37 +96,44 @@ class Logger:
                 hyperparameter configuration with multiple random seeds, you
                 should give them all the same ``exp_name``.)
         """
-        self.output_dir = output_dir or "/tmp/experiments/%i"%int(time.time())
-        if osp.exists(self.output_dir):
-            print("Warning: Log dir %s already exists! Storing info there anyway."%self.output_dir)
-        else:
-            os.makedirs(self.output_dir)
-
-        # If exist progress.txt, append results to progress.txt.
-        self.output_file_path = osp.join(self.output_dir, output_fname)
-        if osp.exists(self.output_file_path):
-            open_mode = 'a'
-            # IF progress.txt is not empty, read headers. Otherwise, set headders to [].
-            if os.path.getsize(self.output_file_path) > 0:
-                self.first_row = False
-                self.log_headers = pd.read_csv(self.output_file_path, sep='\t').keys().tolist() # Read header
+        if proc_id()==0:
+            self.output_dir = output_dir or "/tmp/experiments/%i"%int(time.time())
+            if osp.exists(self.output_dir):
+                print("Warning: Log dir %s already exists! Storing info there anyway."%self.output_dir)
             else:
+                os.makedirs(self.output_dir)
+
+            # If exist progress.txt, append results to progress.txt.
+            self.output_file_path = osp.join(self.output_dir, output_fname)
+            if osp.exists(self.output_file_path):
+                open_mode = 'a'
+                # IF progress.txt is not empty, read headers. Otherwise, set headders to [].
+                if os.path.getsize(self.output_file_path) > 0:
+                    self.first_row = False
+                    self.log_headers = pd.read_csv(self.output_file_path, sep='\t').keys().tolist() # Read header
+                else:
+                    self.first_row = True
+                    self.log_headers = []
+            else:
+                open_mode = 'w'
                 self.first_row = True
                 self.log_headers = []
+            self.output_file = open(self.output_file_path, open_mode)
+            atexit.register(self.output_file.close)
+            print(colorize("Logging data to %s"%self.output_file.name, 'green', bold=True))
         else:
-            open_mode = 'w'
+            self.output_dir = None
+            self.output_file = None
             self.first_row = True
             self.log_headers = []
-        self.output_file = open(self.output_file_path, open_mode)
-        atexit.register(self.output_file.close)
-        print(colorize("Logging data to %s"%self.output_file.name, 'green', bold=True))
 
         self.log_current_row = {}
         self.exp_name = exp_name
 
     def log(self, msg, color='green'):
         """Print a colorized message to stdout."""
-        print(colorize(msg, color, bold=True))
+        if proc_id()==0:
+            print(colorize(msg, color, bold=True))
 
     def log_tabular(self, key, val):
         """
@@ -188,12 +170,12 @@ class Logger:
         config_json = convert_json(config)
         if self.exp_name is not None:
             config_json['exp_name'] = self.exp_name
-
-        output = json.dumps(config_json, separators=(',',':\t'), indent=4, sort_keys=True)
-        print(colorize('Saving config:\n', color='cyan', bold=True))
-        print(output)
-        with open(osp.join(self.output_dir, "config.json"), 'w') as out:
-            out.write(output)
+        if proc_id()==0:
+            output = json.dumps(config_json, separators=(',',':\t'), indent=4, sort_keys=True)
+            print(colorize('Saving config:\n', color='cyan', bold=True))
+            print(output)
+            with open(osp.join(self.output_dir, "config.json"), 'w') as out:
+                out.write(output)
 
     def save_state(self, state_dict, itr=None):
         """
@@ -216,15 +198,16 @@ class Logger:
 
             itr: An int, or None. Current iteration of training.
         """
-        fname = 'vars.pkl' if itr is None else 'vars%d.pkl'%itr
-        try:
-            joblib.dump(state_dict, osp.join(self.output_dir, fname))
-        except:
-            self.log('Warning: could not pickle state_dict.', color='red')
-        if hasattr(self, 'tf_saver_elements'):
-            self._tf_simple_save(itr)
-        if hasattr(self, 'pytorch_saver_elements'):
-            self._pytorch_simple_save(itr)
+        if proc_id()==0:
+            fname = 'vars.pkl' if itr is None else 'vars%d.pkl'%itr
+            try:
+                joblib.dump(state_dict, osp.join(self.output_dir, fname))
+            except:
+                self.log('Warning: could not pickle state_dict.', color='red')
+            if hasattr(self, 'tf_saver_elements'):
+                self._tf_simple_save(itr)
+            if hasattr(self, 'pytorch_saver_elements'):
+                self._pytorch_simple_save(itr)
 
     def setup_tf_saver(self, sess, inputs, outputs):
         """
@@ -253,16 +236,17 @@ class Logger:
         Uses simple_save to save a trained model, plus info to make it easy
         to associated tensors to variables after restore. 
         """
-        assert hasattr(self, 'tf_saver_elements'), \
-            "First have to setup saving with self.setup_tf_saver"
-        fpath = 'tf1_save' + ('%d'%itr if itr is not None else '')
-        fpath = osp.join(self.output_dir, fpath)
-        if osp.exists(fpath):
-            # simple_save refuses to be useful if fpath already exists,
-            # so just delete fpath if it's there.
-            shutil.rmtree(fpath)
-        tf.saved_model.simple_save(export_dir=fpath, **self.tf_saver_elements)
-        joblib.dump(self.tf_saver_info, osp.join(fpath, 'model_info.pkl'))
+        if proc_id()==0:
+            assert hasattr(self, 'tf_saver_elements'), \
+                "First have to setup saving with self.setup_tf_saver"
+            fpath = 'tf1_save' + ('%d'%itr if itr is not None else '')
+            fpath = osp.join(self.output_dir, fpath)
+            if osp.exists(fpath):
+                # simple_save refuses to be useful if fpath already exists,
+                # so just delete fpath if it's there.
+                shutil.rmtree(fpath)
+            tf.saved_model.simple_save(export_dir=fpath, **self.tf_saver_elements)
+            joblib.dump(self.tf_saver_info, osp.join(fpath, 'model_info.pkl'))
     
 
     def setup_pytorch_saver(self, what_to_save):
@@ -285,24 +269,25 @@ class Logger:
         """
         Saves the PyTorch model (or models).
         """
-        assert hasattr(self, 'pytorch_saver_elements'), \
-            "First have to setup saving with self.setup_pytorch_saver"
-        fpath = 'pyt_save'
-        fpath = osp.join(self.output_dir, fpath)
-        fname = 'model' + ('%d'%itr if itr is not None else '') + '.pt'
-        fname = osp.join(fpath, fname)
-        os.makedirs(fpath, exist_ok=True)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            # We are using a non-recommended way of saving PyTorch models,
-            # by pickling whole objects (which are dependent on the exact
-            # directory structure at the time of saving) as opposed to
-            # just saving network weights. This works sufficiently well
-            # for the purposes of Spinning Up, but you may want to do
-            # something different for your personal PyTorch project.
-            # We use a catch_warnings() context to avoid the warnings about
-            # not being able to save the source code.
-            torch.save(self.pytorch_saver_elements, fname)
+        if proc_id()==0:
+            assert hasattr(self, 'pytorch_saver_elements'), \
+                "First have to setup saving with self.setup_pytorch_saver"
+            fpath = 'pyt_save'
+            fpath = osp.join(self.output_dir, fpath)
+            fname = 'model' + ('%d'%itr if itr is not None else '') + '.pt'
+            fname = osp.join(fpath, fname)
+            os.makedirs(fpath, exist_ok=True)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                # We are using a non-recommended way of saving PyTorch models,
+                # by pickling whole objects (which are dependent on the exact
+                # directory structure at the time of saving) as opposed to
+                # just saving network weights. This works sufficiently well
+                # for the purposes of Spinning Up, but you may want to do 
+                # something different for your personal PyTorch project.
+                # We use a catch_warnings() context to avoid the warnings about
+                # not being able to save the source code.
+                torch.save(self.pytorch_saver_elements, fname)
 
 
     def dump_tabular(self):
@@ -311,24 +296,25 @@ class Logger:
 
         Writes both to stdout, and to the output file.
         """
-        vals = []
-        key_lens = [len(key) for key in self.log_headers]
-        max_key_len = max(15,max(key_lens))
-        keystr = '%'+'%d'%max_key_len
-        fmt = "| " + keystr + "s | %15s |"
-        n_slashes = 22 + max_key_len
-        print("-"*n_slashes)
-        for key in self.log_headers:
-            val = self.log_current_row.get(key, "")
-            valstr = "%8.3g"%val if hasattr(val, "__float__") else val
-            print(fmt%(key, valstr))
-            vals.append(val)
-        print("-"*n_slashes, flush=True)
-        if self.output_file is not None:
-            if self.first_row:
-                self.output_file.write("\t".join(self.log_headers)+"\n")
-            self.output_file.write("\t".join(map(str,vals))+"\n")
-            self.output_file.flush()
+        if proc_id()==0:
+            vals = []
+            key_lens = [len(key) for key in self.log_headers]
+            max_key_len = max(15,max(key_lens))
+            keystr = '%'+'%d'%max_key_len
+            fmt = "| " + keystr + "s | %15s |"
+            n_slashes = 22 + max_key_len
+            print("-"*n_slashes)
+            for key in self.log_headers:
+                val = self.log_current_row.get(key, "")
+                valstr = "%8.3g"%val if hasattr(val, "__float__") else val
+                print(fmt%(key, valstr))
+                vals.append(val)
+            print("-"*n_slashes, flush=True)
+            if self.output_file is not None:
+                if self.first_row:
+                    self.output_file.write("\t".join(self.log_headers)+"\n")
+                self.output_file.write("\t".join(map(str,vals))+"\n")
+                self.output_file.flush()
         self.log_current_row.clear()
         self.first_row=False
 
@@ -397,7 +383,7 @@ class EpochLogger(Logger):
         else:
             v = self.epoch_dict[key]
             vals = np.concatenate(v) if isinstance(v[0], np.ndarray) and len(v[0].shape)>0 else v
-            stats = statistics_scalar(vals, with_min_and_max=with_min_and_max)
+            stats = mpi_statistics_scalar(vals, with_min_and_max=with_min_and_max)
             super().log_tabular(key if average_only else 'Average' + key, stats[0])
             if not(average_only):
                 super().log_tabular('Std'+key, stats[1])
@@ -412,4 +398,4 @@ class EpochLogger(Logger):
         """
         v = self.epoch_dict[key]
         vals = np.concatenate(v) if isinstance(v[0], np.ndarray) and len(v[0].shape)>0 else v
-        return statistics_scalar(vals)
+        return mpi_statistics_scalar(vals)
