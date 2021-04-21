@@ -3,9 +3,11 @@ import numpy as np
 import torch
 from torch.optim import Adam
 import gym
+import pybullet_envs
 import time
-import spinup.algos.pytorch.ddpg.core as core
+import spinup.orig_algos.pytorch.ddpg.core as core
 from spinup.utils.logx import EpochLogger
+import os.path as osp
 
 
 class ReplayBuffer:
@@ -316,9 +318,14 @@ if __name__ == '__main__':
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--exp_name', type=str, default='ddpg')
+    parser.add_argument("--data_dir", type=str, default='po_spinup_data')
     args = parser.parse_args()
 
     from spinup.utils.run_utils import setup_logger_kwargs
+
+    data_dir = osp.join(
+        osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
+        args.data_dir)
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
 
     ddpg(lambda : gym.make(args.env), actor_critic=core.MLPActorCritic,
