@@ -365,7 +365,7 @@ if __name__ == '__main__':
     data_dir = osp.join(
         osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
         args.data_dir)
-    logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
+    logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
 
     torch.set_num_threads(torch.get_num_threads())
 
