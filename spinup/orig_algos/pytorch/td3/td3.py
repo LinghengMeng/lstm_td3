@@ -7,7 +7,7 @@ import gym
 import pybullet_envs
 import time
 import spinup.orig_algos.pytorch.td3.core as core
-from spinup.utils.logx import EpochLogger
+from spinup.utils.logx import EpochLogger, setup_logger_kwargs
 import os.path as osp
 
 
@@ -362,7 +362,6 @@ if __name__ == '__main__':
     parser.add_argument("--data_dir", type=str, default='po_spinup_data')
     args = parser.parse_args()
 
-    from spinup.utils.run_utils import setup_logger_kwargs
     data_dir = osp.join(
         osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
         args.data_dir)
