@@ -1,21 +1,17 @@
 from copy import deepcopy
 import itertools
 import numpy as np
-import json
-import pandas as pd
-import sqlite3
+import random
 import torch
 from torch.optim import Adam
 import gym
 import pybulletgym
 import pybullet_envs
 import time
-import spinup.algos.pytorch.td3_db.core as core
+import spinup.algos.pytorch.td3_db_new.core as core
 from spinup.utils.mpi_logx import EpochLogger
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
-
-from sklearn.utils import shuffle
 
 
 class ReplayBuffer:
@@ -29,126 +25,66 @@ class ReplayBuffer:
         self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
         self.done_buf = np.zeros(size, dtype=np.float32)
+        self.sampled_num_buf = np.zeros(size, dtype=np.float32)
         self.ptr, self.size, self.max_size = 0, 0, size
 
-    def store(self, obs, act, next_obs, rew, rew2, done):
+    def store(self, obs, act, rew, next_obs, done):
         self.obs_buf[self.ptr] = obs
         self.obs2_buf[self.ptr] = next_obs
         self.act_buf[self.ptr] = act
         self.rew_buf[self.ptr] = rew
         self.done_buf[self.ptr] = done
+        self.sampled_num_buf[self.ptr] = 0
         self.ptr = (self.ptr+1) % self.max_size
         self.size = min(self.size+1, self.max_size)
 
-    def sample_batch(self, batch_size=32, device=None, idxs=None):
-        if idxs is None:
+    def sample_batch(self, batch_size=32, device=None, sample_type='genuine_random'):
+        # (1) pseudo_random  (2) genuine_random
+        if sample_type == 'genuine_random':
+            # sample_weights = (self.max_size - self.sampled_num_buf) / self.max_size
+
+            # 1e-6 is causes only the latest experience being sampled in a mini-batch. It's good at the beginning of
+            # the learning, but causes very slow improvement in later phase.
+            sample_weights = 1 / (self.sampled_num_buf + 1e-1)
+
+            # 0.5 is better than 1e-6, because it give older experiences a chance to be sampled.
+            # sample_weights = 1 / (self.sampled_num_buf + 0.5)
+
+            # sample_weights = 1 / (self.sampled_num_buf + 0.1)
+
+            sample_weights = np.exp(self.rew_buf)
+
+            # sample_weights = np.exp(-self.sampled_num_buf)  # Very bad performance
+            population_id = np.arange(self.size)
+
+            batch_size = min(batch_size, self.size)
+
+            # # With replacement
+            # idxs = random.choices(population_id, sample_weights[:self.size], k=batch_size)
+
+            # Without replacement
+            idxs = np.random.choice(population_id, size=batch_size, replace=False,
+                                    p=sample_weights[:self.size] / sample_weights[:self.size].sum())
+
+        elif sample_type == "alternate_random":
+            # TODO: alternate between genuine_random and pseudo_random to allow a balance between
+            # recent and past experiences.
+            pass
+        elif sample_type == 'pseudo_random':
             idxs = np.random.randint(0, self.size, size=batch_size)
+
+        # Increase sampled_num by 1 and update sample_weights
+        # TODO: only update sample_weights on sampled experiences
+        # Crucial note: if sample with replace there may be experiences sample multiple times, so use for loop.
+        for i in idxs:
+            self.sampled_num_buf[i] += 1
+
         batch = dict(obs=self.obs_buf[idxs],
                      obs2=self.obs2_buf[idxs],
                      act=self.act_buf[idxs],
                      rew=self.rew_buf[idxs],
                      done=self.done_buf[idxs])
         return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k,v in batch.items()}
-
-
-def adapt_array(arr):
-    """adapt array to text"""
-    return json.dumps(arr.tolist())
-
-
-def convert_array(text):
-    """convert text back to array"""
-    return np.asarray(json.loads(text))
-
-
-# Converts np.array to TEXT when inserting
-sqlite3.register_adapter(np.ndarray, adapt_array)
-
-# Converts TEXT to np.array when selecting
-sqlite3.register_converter("array", convert_array)
-
-
-class ReplayBufferDatabaseOperator:
-    """A replay buffer based on database."""
-
-    def __init__(self, max_replay_size=1e6,
-                 db_file="test_database", table_name="experience"):
-        """Initialize replay buffer"""
-
-        self.max_replay_size = max_replay_size
-        self.table_name = table_name
-        self.size = 0
-
-        # Connect to database
-        self.db_conn = sqlite3.connect(db_file, detect_types=sqlite3.PARSE_DECLTYPES)
-        self.cur = self.db_conn.cursor()
-        # Create table if not exists
-        self.cur.execute(
-            "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, \
-                                            obs ARRAY, \
-                                            act ARRAY, \
-                                            pb_rew REAL, \
-                                            hc_rew REAL, \
-                                            obs2 ARRAY, \
-                                            done INTEGER,\
-                                            sampled_num INTEGER DEFAULT 0)".format(table_name))
-
-        # Initialize current replay buffer size if the number of previous experiences in database is larger than the
-        # maximum of the reply buffer size set the current replay buffer to max_replay_size.
-        self.cur.execute('SELECT COUNT(*) from {}'.format(self.table_name))
-        self.size = min(self.max_replay_size, self.cur.fetchone()[0])
-        self.start_id = 0
-        self.cur.execute('SELECT max(id) FROM {}'.format(self.table_name))
-        max_id = self.cur.fetchone()[0]
-        if max_id is None:
-            self.end_id = 0
-            self.size = 0
-            self.start_id = 1   # start_id always start from 1 in database table
-        else:
-            self.end_id = max_id
-            self.size = min(self.max_replay_size, max_id)
-            self.start_id = self.end_id - self.size + 1
-
-    def all_data(self):
-        # Fetch sampled experiences from database
-        self.cur.execute("SELECT * FROM {}".format(self.table_name))
-        batch_df = pd.DataFrame(self.cur.fetchall(), columns=[col[0] for col in self.cur.description])
-        return batch_df
-
-    def store(self, obs, act, obs2, pb_rew, hc_rew, done):
-        """Store experience into database"""
-        self.cur.execute(
-            "INSERT INTO {}(obs, act, obs2, pb_rew, hc_rew, done) VALUES (?,?,?,?,?,?)".format(self.table_name),
-            (obs, act, obs2, pb_rew, hc_rew, done))
-        # Commit is time-consuming, can be improved by calling commit() periodically.
-        self.db_conn.commit()
-        self.size += 1
-        self.end_id += 1
-
-    def sample_batch(self, batch_size=64, device=None):
-        """Sample a mini-batch of experiences"""
-        # It's faster to use randint to generate random sample indices rather than fetching ids from the database.
-        batch_idxs = np.random.randint(self.start_id, self.end_id, size=min(batch_size, self.size))
-
-        # Fetch sampled experiences from database
-        self.cur.execute("SELECT * FROM {} WHERE id in {}".format(self.table_name, tuple(batch_idxs)))
-        batch_df = pd.DataFrame(self.cur.fetchall(), columns=[col[0] for col in self.cur.description])
-
-        # # Crucial shuffle sampled batch, because SQLite return selections in order
-        # # (Note: shuffle is not necessary. It seems shuffle is help in stabilizing learning, but not very clear.)
-        # batch_df = shuffle(batch_df)
-
-        # Increase the sampled_num of the sampled experiences
-        self.cur.execute(
-            "UPDATE {} SET sampled_num=sampled_num+1  WHERE id in {}".format(self.table_name, tuple(batch_idxs)))
-
-        # From batch tensor
-        batch = dict(obs=np.stack(batch_df['obs']),
-                     act=np.stack(batch_df['act']),
-                     obs2=np.stack(batch_df['obs2']),
-                     rew=np.stack(batch_df['pb_rew']),
-                     done=np.stack(batch_df['done']))
-        return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch.items()}, batch_df['id'].values
 
 
 def td3(env_name, partially_observable=False,
@@ -294,14 +230,7 @@ def td3(env_name, partially_observable=False,
     q_params = itertools.chain(ac.q1.parameters(), ac.q2.parameters())
 
     # Experience buffer
-    db_based_replay_buffer = True
-
-    # if db_based_replay_buffer:
-    db_file = osp.join(logger_kwargs['output_dir'], 'database.sqlite3')
-    db_file = ':memory:'
-    db_replay_buffer = ReplayBufferDatabaseOperator(max_replay_size=replay_size, db_file=db_file)
-    # else:
-    mem_replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size)
+    replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size)
 
     # Count variables (protip: try to get a feel for how different size networks behave!)
     var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.q1, ac.q2])
@@ -435,8 +364,7 @@ def td3(env_name, partially_observable=False,
         d = False if ep_len==max_ep_len else d
 
         # Store experience to replay buffer
-        mem_replay_buffer.store(o, a, o2, r, r, d)
-        db_replay_buffer.store(o, a, o2, r, r, d)
+        replay_buffer.store(o, a, r, o2, d)
 
         # Super critical, easy to overlook step: make sure to update 
         # most recent observation!
@@ -450,17 +378,9 @@ def td3(env_name, partially_observable=False,
         # Update handling
         if t >= update_after and t % update_every == 0:
             for j in range(update_every):
-                # DB id starts from 1, and will fetch with sort
-                db_batch, batch_idxs = db_replay_buffer.sample_batch(batch_size, device=device)
-                batch = mem_replay_buffer.sample_batch(batch_size, device=device, idxs=batch_idxs-1)
-                # Debug if the bath from database and memory are the same
-                if not torch.all(db_batch['obs']==batch['obs']) or not torch.all(db_batch['obs2']==batch['obs2']) \
-                    or not torch.all(db_batch['act']==batch['act']) or not torch.all(db_batch['done']==batch['done']) \
-                        or not torch.all(db_batch['rew']==batch['rew']):
-                    import pdb;
-                    pdb.set_trace()
-                # update(data=batch, timer=j)
-                update(data=db_batch, timer=j)
+                sample_type = 'genuine_random'  # 'pseudo_random'  genuine_random
+                batch = replay_buffer.sample_batch(batch_size, device=device, sample_type=sample_type)
+                update(data=batch, timer=j)
 
         # End of epoch handling
         if (t+1) % steps_per_epoch == 0:

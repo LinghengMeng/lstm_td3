@@ -7,7 +7,7 @@ import gym
 import pybulletgym
 import time
 import spinup.algos.pytorch.sac.core as core
-from spinup.utils.logx import EpochLogger
+from spinup.utils.mpi_logx import EpochLogger
 
 
 class ReplayBuffer:

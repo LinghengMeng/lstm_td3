@@ -27,6 +27,16 @@ class ReplayBuffer:
         self.done_buf = np.zeros(size, dtype=np.float32)
         self.sampled_num_buf = np.zeros(size, dtype=np.float32)
         self.ptr, self.size, self.max_size = 0, 0, size
+        # Info used for sampling
+        self.sampled_num_buf = np.zeros(size, dtype=np.float32)
+        self.pred_q1_buf = {i: [] for i in range(size)}
+        self.pred_q2_buf = {i: [] for i in range(size)}
+        self.targ_q_buf = {i: [] for i in range(size)}
+        self.targ_next_q1_buf = {i: [] for i in range(size)}
+        self.targ_next_q2_buf = {i: [] for i in range(size)}
+        self.targ_next_q_buf = {i: [] for i in range(size)}
+        self.hist_tuned_indicator_buf = {i: [] for i in range(size)}
+        self.sampled_time_buf = {i: [] for i in range(size)}  # indicate when the sample is sampled
 
     def store(self, obs, act, rew, next_obs, done):
         self.obs_buf[self.ptr] = obs
@@ -37,6 +47,18 @@ class ReplayBuffer:
         self.sampled_num_buf[self.ptr] = 0
         self.ptr = (self.ptr+1) % self.max_size
         self.size = min(self.size+1, self.max_size)
+
+    def add_sample_hist(self, sample_idxs, q1, q2, backup,
+                        q1_pi_targ, q2_pi_targ, q_pi_targ, t):
+        """Add prediction history."""
+        for i in range(len(sample_idxs)):
+            self.pred_q1_buf[sample_idxs[i]].append(q1[i])
+            self.pred_q2_buf[sample_idxs[i]].append(q2[i])
+            self.targ_q_buf[sample_idxs[i]].append(backup[i])
+            self.targ_next_q1_buf[sample_idxs[i]].append(q1_pi_targ[i])
+            self.targ_next_q2_buf[sample_idxs[i]].append(q2_pi_targ[i])
+            self.targ_next_q_buf[sample_idxs[i]].append(q_pi_targ[i])
+            self.sampled_time_buf[sample_idxs[i]].append(t)
 
     def sample_batch(self, batch_size=32, device=None, sample_type='genuine_random'):
         # (1) pseudo_random  (2) genuine_random
@@ -51,6 +73,8 @@ class ReplayBuffer:
             # sample_weights = 1 / (self.sampled_num_buf + 0.5)
 
             # sample_weights = 1 / (self.sampled_num_buf + 0.1)
+
+            sample_weights = np.exp(self.rew_buf)
 
             # sample_weights = np.exp(-self.sampled_num_buf)  # Very bad performance
             population_id = np.arange(self.size)
@@ -82,7 +106,15 @@ class ReplayBuffer:
                      act=self.act_buf[idxs],
                      rew=self.rew_buf[idxs],
                      done=self.done_buf[idxs])
-        return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k,v in batch.items()}
+        batch_hist = dict(pred_q1_hist=[self.pred_q1_buf[i] for i in idxs],
+                          pred_q2_hist=[self.pred_q2_buf[i] for i in idxs],
+                          targ_q_hist=[self.targ_q_buf[i] for i in idxs],
+                          targ_next_q1_hist=[self.targ_next_q1_buf[i] for i in idxs],
+                          targ_next_q2_hist=[self.targ_next_q2_buf[i] for i in idxs],
+                          targ_next_q_hist=[self.targ_next_q_buf[i] for i in idxs],
+                          sampled_time_hist=[self.sampled_time_buf[i] for i in idxs])
+        return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k,v in batch.items()}, \
+               batch_hist, idxs
 
 
 def td3(env_name, partially_observable=False,
@@ -235,7 +267,7 @@ def td3(env_name, partially_observable=False,
     logger.log('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d\n'%var_counts)
 
     # Set up function for computing TD3 Q-losses
-    def compute_loss_q(data):
+    def compute_loss_q(data, batch_hist, timer):
         o, a, r, o2, d = data['obs'], data['act'], data['rew'], data['obs2'], data['done']
 
         q1 = ac.q1(o,a)
@@ -254,9 +286,34 @@ def td3(env_name, partially_observable=False,
             # Target Q-values
             q1_pi_targ = ac_targ.q1(o2, a2)
             q2_pi_targ = ac_targ.q2(o2, a2)
-            q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
-            backup = r + gamma * (1 - d) * q_pi_targ
 
+            # # Original
+            # q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
+            # backup = r + gamma * (1 - d) * q_pi_targ
+
+            # Prudent Optimism
+            q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
+            mean_targ_next_q_hist = []
+            tuned_indicator = np.zeros(q1_pi_targ.shape)
+            for i in range(len(batch_hist['targ_next_q_hist'])):
+                tmp_batch_hist = np.asarray(batch_hist['targ_next_q_hist'][i])
+                tmp_batch_hist = np.append(tmp_batch_hist, q_pi_targ[i].item())  # add new prediction
+                change_rate = tmp_batch_hist[1:] - tmp_batch_hist[:-1]
+                rate_of_change = np.abs(tmp_batch_hist[1:] - tmp_batch_hist[:-1]) / np.abs(tmp_batch_hist[:-1])
+                if len(tmp_batch_hist) == 1:
+                    avg_window = tmp_batch_hist[-1]
+                else:
+                    threshold = 5  # thresold=1 works for HalfCheetahBulletEnv-v0
+                    if change_rate[-1] > threshold:
+                        avg_window = tmp_batch_hist[-2] + threshold
+                        # avg_window = tmp_batch_hist[-2]
+                        tuned_indicator[i] = 1
+                    else:
+                        avg_window = tmp_batch_hist[-1]
+                mean_targ_next_q_hist.append(avg_window)
+            avg_q_pi_targ = torch.as_tensor(mean_targ_next_q_hist, dtype=torch.float32).to(device)
+            backup = r + gamma * (1 - d) * avg_q_pi_targ
+        # import pdb; pdb.set_trace()
         # MSE loss against Bellman backup
         loss_q1 = ((q1 - backup)**2).mean()
         loss_q2 = ((q2 - backup)**2).mean()
@@ -266,7 +323,7 @@ def td3(env_name, partially_observable=False,
         loss_info = dict(Q1Vals=q1.cpu().detach().numpy(),
                          Q2Vals=q2.cpu().detach().numpy())
 
-        return loss_q, loss_info
+        return loss_q, loss_info, q1, q2, backup, q1_pi_targ, q2_pi_targ, avg_q_pi_targ
 
     # Set up function for computing TD3 pi loss
     def compute_loss_pi(data):
@@ -281,10 +338,10 @@ def td3(env_name, partially_observable=False,
     # Set up model saving
     logger.setup_pytorch_saver(ac)
 
-    def update(data, timer):
+    def update(data, batch_hist, timer):
         # First run one gradient descent step for Q1 and Q2
         q_optimizer.zero_grad()
-        loss_q, loss_info = compute_loss_q(data)
+        loss_q, loss_info, q1, q2, backup, q1_pi_targ, q2_pi_targ, q_pi_targ = compute_loss_q(data, batch_hist, timer)
         loss_q.backward()
         q_optimizer.step()
 
@@ -319,6 +376,11 @@ def td3(env_name, partially_observable=False,
                     # params, as opposed to "mul" and "add", which would make new tensors.
                     p_targ.data.mul_(polyak)
                     p_targ.data.add_((1 - polyak) * p.data)
+
+        return q1.cpu().detach().numpy(), q2.cpu().detach().numpy(), \
+               backup.cpu().detach().numpy(), \
+               q1_pi_targ.cpu().detach().numpy(), q2_pi_targ.cpu().detach().numpy(), \
+               q_pi_targ.cpu().detach().numpy()
 
     def get_action(o, noise_scale):
         a = ac.act(torch.as_tensor(o, dtype=torch.float32).to(device))
@@ -376,17 +438,27 @@ def td3(env_name, partially_observable=False,
         # Update handling
         if t >= update_after and t % update_every == 0:
             for j in range(update_every):
-                sample_type = 'genuine_random'  # 'pseudo_random'  genuine_random
-                batch = replay_buffer.sample_batch(batch_size, device=device, sample_type=sample_type)
-                update(data=batch, timer=j)
+                sample_type = 'pseudo_random'  # 'pseudo_random'  genuine_random
+                batch, batch_hist, batch_idxs = replay_buffer.sample_batch(batch_size, device=device, sample_type=sample_type)
+                hist_q1, hist_q2, hist_backup, \
+                hist_q1_pi_targ, hist_q2_pi_targ, hist_q_pi_targ = update(data=batch, batch_hist=batch_hist, timer=j)
+                replay_buffer.add_sample_hist(batch_idxs, hist_q1, hist_q2, hist_backup,
+                                              hist_q1_pi_targ, hist_q2_pi_targ, hist_q_pi_targ, t)
+
 
         # End of epoch handling
         if (t+1) % steps_per_epoch == 0:
             epoch = (t+1) // steps_per_epoch
 
             # Save model
+            fpath = osp.join(logger.output_dir, 'pyt_save')
+            os.makedirs(fpath, exist_ok=True)
+            context_fname = 'checkpoint-context-' + (
+                'Step-%d' % t if t is not None else '') + '.pt'
+            context_fname = osp.join(fpath, context_fname)
             if (epoch % save_freq == 0) or (epoch == epochs):
                 logger.save_state({'env': env}, None)
+                torch.save({'replay_buffer': replay_buffer}, context_fname)
 
             # Test the performance of the deterministic version of the agent.
             test_agent()
@@ -444,8 +516,11 @@ if __name__ == '__main__':
     # Set log data saving directory
     from spinup.utils.run_utils import setup_logger_kwargs
 
+    # data_dir = osp.join(
+    #     osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
+    #     args.data_dir)
     data_dir = osp.join(
-        osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
+        osp.dirname("D:\spinup_new_data"),
         args.data_dir)
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
 

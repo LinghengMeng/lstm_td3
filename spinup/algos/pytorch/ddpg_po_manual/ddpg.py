@@ -1,21 +1,17 @@
 from copy import deepcopy
 import numpy as np
+import random
 import torch
-import torch.nn as nn
-from torch.distributions.normal import Normal
-from torch.distributions.laplace import Laplace
 from torch.optim import Adam
 import gym
 import pybulletgym
+import pybullet_envs
 import time
-import spinup.algos.pytorch.ddpg_distribution.core as core
+import spinup.algos.pytorch.ddpg_po_manual.core as core
 from spinup.utils.mpi_logx import EpochLogger
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
-
-DEVICE = "cuda"  # "cuda" "cpu"
-LOG_STD_MAX = 10
-LOG_STD_MIN = -20
+import os
 
 
 class ReplayBuffer:
@@ -28,7 +24,15 @@ class ReplayBuffer:
         self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
         self.done_buf = np.zeros(size, dtype=np.float32)
+        # Global info
         self.ptr, self.size, self.max_size = 0, 0, size
+        # Info used for sampling
+        self.sampled_num_buf = np.zeros(size, dtype=np.float32)
+        self.pred_q_buf = {i: [] for i in range(size)}
+        self.targ_q_buf = {i: [] for i in range(size)}
+        self.targ_next_q_buf = {i: [] for i in range(size)}
+        self.hist_tuned_indicator_buf = {i: [] for i in range(size)}
+        self.sampled_time_buf = {i: [] for i in range(size)}    # indicate when the sample is sampled
 
     def store(self, obs, act, rew, next_obs, done):
         self.obs_buf[self.ptr] = obs
@@ -39,109 +43,78 @@ class ReplayBuffer:
         self.ptr = (self.ptr+1) % self.max_size
         self.size = min(self.size+1, self.max_size)
 
-    def sample_batch(self, batch_size=32):
-        idxs = np.random.randint(0, self.size, size=batch_size)
+    def add_sample_hist(self, sample_idxs, pred_q, targ_q, targ_next_q, tuned_indicator, t):
+        """Add prediction history."""
+        for i in range(len(sample_idxs)):
+            self.pred_q_buf[sample_idxs[i]].append(pred_q[i])
+            self.targ_q_buf[sample_idxs[i]].append(targ_q[i])
+            self.targ_next_q_buf[sample_idxs[i]].append(targ_next_q[i])
+            self.hist_tuned_indicator_buf[sample_idxs[i]].append(tuned_indicator[i])
+            self.sampled_time_buf[sample_idxs[i]].append(t)
+
+    def sample_batch(self, batch_size=32, device=None, sample_type='genuine_random'):
+        # (1) pseudo_random  (2) genuine_random
+        if sample_type == 'genuine_random':
+            # sample_weights = (self.max_size - self.sampled_num_buf) / self.max_size
+
+            # 1e-6 is causes only the latest experience being sampled in a mini-batch. It's good at the beginning of
+            # the learning, but causes very slow improvement in later phase.
+            # sample_weights = 1 / (self.sampled_num_buf + 1e-1)
+            # import pdb; pdb.set_trace()
+            # 0.5 is better than 1e-6, because it give older experiences a chance to be sampled.
+            # sample_weights = 1 / (self.sampled_num_buf + 0.5)
+
+            sample_weights = 1 / (self.sampled_num_buf + 0.1)
+
+            # sample_weights = np.exp(-self.sampled_num_buf)  # Very bad performance
+
+            # Pessimistic weights: increase the sampling probability of experiences with lower reward
+            # Optimistic weights: increase the sampling probability of experiences with higher reward
+            sample_weights = sample_weights + np.exp(self.rew_buf)
+            # sample_weights = np.exp(self.rew_buf)
+
+            population_id = np.arange(self.size)
+
+            batch_size = min(batch_size, self.size)
+
+            # # With replacement
+            # idxs = random.choices(population_id, sample_weights[:self.size], k=batch_size)
+
+            # Without replacement
+            idxs = np.random.choice(population_id, size=batch_size, replace=False,
+                                    p=sample_weights[:self.size] / sample_weights[:self.size].sum())
+
+        elif sample_type == "alternate_random":
+            # TODO: alternate between genuine_random and pseudo_random to allow a balance between
+            # recent and past experiences.
+            pass
+        elif sample_type == 'pseudo_random':
+            idxs = np.random.randint(0, self.size, size=batch_size)
+
+        # Increase sampled_num by 1 and update sample_weights
+        # TODO: only update sample_weights on sampled experiences
+        # Crucial note: if sample with replace there may be experiences sample multiple times, so use for loop.
+        for i in idxs:
+            self.sampled_num_buf[i] += 1
+
         batch = dict(obs=self.obs_buf[idxs],
                      obs2=self.obs2_buf[idxs],
                      act=self.act_buf[idxs],
                      rew=self.rew_buf[idxs],
-                     done=self.done_buf[idxs])
-        return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in batch.items()}
-
-
-class MLPCritic(nn.Module):
-    def __init__(self, obs_dim, act_dim, hidden_sizes=[256, 256], dist_type='Normal'):
-        super(MLPCritic, self).__init__()
-        self.dist_type = dist_type
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
-        self.layer_sizes = [obs_dim + act_dim] + hidden_sizes + [1]
-
-        self.layers = nn.ModuleList()
-        # Hidden layers
-        for h_i in range(len(self.layer_sizes) - 2):
-            self.layers += [nn.Linear(self.layer_sizes[h_i], self.layer_sizes[h_i + 1]),
-                            nn.ReLU()]
-            # Note:
-            #   1. ReLU will cause very high Standard Deviation, i.e. SD explosion, with fixed_gamma=0.99.
-            #   2. ReLU will not cause SD explosion with adaptive gamma.
-            #  Conclude: Lower gamma at the beginning is helpful in alleviating SD explosion.
-        # Output layer
-        self.mu_layer = nn.Linear(self.layer_sizes[-2], self.layer_sizes[-1])
-        self.log_std_layer = nn.Linear(self.layer_sizes[-2], self.layer_sizes[-1])
-
-    def forward(self, obs, act):
-        x = torch.cat([obs, act], dim=-1)
-        hid_activation = []
-        # Hidden layers
-        for h_i in range(len(self.layers)):
-            x = self.layers[h_i](x)
-            # Store activation
-            if h_i % 2 == 1:
-                hid_activation.append(x)
-        # Output layer
-        mu = self.mu_layer(x)
-        log_std = self.log_std_layer(x)
-        log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
-        if self.dist_type == 'Normal':
-            q_distribution = Normal(torch.squeeze(mu, -1), torch.squeeze(torch.exp(log_std), -1))
-        elif self.dist_type == 'Laplace':
-            q_distribution = Laplace(torch.squeeze(mu, -1), torch.squeeze(torch.exp(log_std), -1))
-        return torch.squeeze(mu, -1), torch.squeeze(log_std, -1), q_distribution, hid_activation  # Critical to ensure q has right shape.
-
-
-class MLPActor(nn.Module):
-    def __init__(self, obs_dim, act_dim, act_limit, hidden_sizes=[256, 256]):
-        super(MLPActor, self).__init__()
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
-        self.act_limit = act_limit
-        self.layer_sizes = [obs_dim] + hidden_sizes + [act_dim]
-
-        self.layers = nn.ModuleList()
-        # Hidden layers
-        for h_i in range(len(self.layer_sizes) - 2):
-            self.layers += [nn.Linear(self.layer_sizes[h_i], self.layer_sizes[h_i + 1]),
-                            nn.Sigmoid()]
-        # Output layer
-        self.layers += [nn.Linear(self.layer_sizes[-2], self.layer_sizes[-1]),
-                        nn.Tanh()]
-
-    def forward(self, obs):
-        x = obs
-        hid_activation = []
-        # Hidden layers
-        for h_i in range(len(self.layers) - 2):
-            x = self.layers[h_i](x)
-            # Store activation
-            if h_i % 2 == 1:
-                hid_activation.append(x)
-        # Output layer
-        x = self.layers[-2](x)
-        x = self.layers[-1](x)
-        return self.act_limit * x, hid_activation
-
-
-class MLPActorCritic(nn.Module):
-    def __init__(self, obs_dim, act_dim, act_limit, critic_hidden_sizes=[256, 256], actor_hidden_sizes=[256, 256], dist_type='Normal'):
-        super(MLPActorCritic, self).__init__()
-        self.q = MLPCritic(obs_dim, act_dim, critic_hidden_sizes, dist_type=dist_type)
-        self.pi = MLPActor(obs_dim, act_dim, act_limit, actor_hidden_sizes)
-
-    def act(self, obs):
-        with torch.no_grad():
-            a, _ = self.pi(obs)
-            return a.cpu().numpy()
+                     done=self.done_buf[idxs],
+                     )
+        batch_hist = dict(pred_q_hist=[self.pred_q_buf[i] for i in idxs],
+                          targ_q_hist=[self.targ_q_buf[i] for i in idxs],
+                          targ_next_q_hist=[self.targ_next_q_buf[i] for i in idxs],
+                          sampled_time_hist=[self.sampled_time_buf[i] for i in idxs])
+        return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k, v in batch.items()}, batch_hist, idxs
 
 
 def ddpg(env_name, partially_observable=False,
          pomdp_type = 'remove_velocity',
          flicker_prob=0.2, random_noise_sigma=0.1, random_sensor_missing_prob=0.1,
-         dist_type = 'Normal',
-         adaptive_gamma=True, adap_gamma_beta=0.1, adap_gamma_min=0, adap_gamma_max=0.99, adap_gamma_tolerable_entropy=3,
          actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
-         steps_per_epoch=4000, epochs=100, replay_size=int(1e6), fixed_gamma=0.99,
-         target_noise=0.2, noise_clip=0.5,
+         steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99, 
          polyak=0.995, pi_lr=1e-3, q_lr=1e-3, batch_size=100, start_steps=10000, 
          update_after=1000, update_every=50, act_noise=0.1, num_test_episodes=10, 
          max_ep_len=1000, logger_kwargs=dict(), save_freq=1):
@@ -250,17 +223,12 @@ def ddpg(env_name, partially_observable=False,
     act_limit = env.action_space.high[0]
 
     # Create actor-critic module and target networks
-    critic_sparsity_penalty_beta = 0.1  # 0.5
-    critic_sparsity_parameter_rho = 0.2  # 0.05
-
-    actor_sparsity_penalty_beta = 0.
-    actor_sparsity_parameter_rho = 0.05
-
-    ac = MLPActorCritic(obs_dim, act_dim, act_limit,
-                        critic_hidden_sizes=[256, 256], actor_hidden_sizes=[256, 256], dist_type=dist_type)
+    ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
     ac_targ = deepcopy(ac)
-    ac.to(DEVICE)
-    ac_targ.to(DEVICE)
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    ac.to(device)
+    ac_targ.to(device)
 
     # Freeze target networks with respect to optimizers (only update via polyak averaging)
     for p in ac_targ.parameters():
@@ -273,97 +241,60 @@ def ddpg(env_name, partially_observable=False,
     var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.q])
     logger.log('\nNumber of parameters: \t pi: %d, \t q: %d\n'%var_counts)
 
-    # def calculate_adaptive_gamma(entropy, beta=0.1, gamma_min=0, gamma_max=0.99):
-    #     """Caculate adaptive gamma based on entropy of the distribution."""
-    #     entropy[entropy < 0] = 0
-    #     return torch.clamp((torch.exp(-beta * entropy) - torch.exp(beta * entropy)) / (
-    #             torch.exp(-beta * entropy) + torch.exp(beta * entropy)) + 1.0, gamma_min, gamma_max)
-    def calculate_adaptive_gamma(entropy, beta=0.1, gamma_min=0, gamma_max=0.99, tolerable_entropy=3):
-        """Caculate adaptive gamma based on entropy of the distribution."""
-        entropy[entropy < 0] = 0
-        return torch.clamp(
-            (torch.exp(-beta * (entropy - tolerable_entropy)) - torch.exp(beta * (entropy - tolerable_entropy))) / (
-                    torch.exp(-beta * (entropy - tolerable_entropy)) + torch.exp(beta * (entropy - tolerable_entropy))) + 1.0,
-            gamma_min, gamma_max)
-
     # Set up function for computing DDPG Q-loss
-    def compute_loss_q(data):
+    def compute_loss_q(data, batch_hist, t):
         o, a, r, o2, d = data['obs'], data['act'], data['rew'], data['obs2'], data['done']
 
-        q_mu, q_log_std, q_distribution, q_hid_activation = ac.q(o, a)
-        q = q_mu
+        q = ac.q(o,a)
 
         # Bellman backup for Q function
         with torch.no_grad():
-            pi_targ, _ = ac_targ.pi(o2)
-            q_pi_mu_targ, q_pi_log_std_targ, q_pi_distribution_targ, _ = ac_targ.q(o2, pi_targ)
+            q_pi_targ = ac_targ.q(o2, ac_targ.pi(o2))
 
-            q_pi_distribution_targ_entropy = q_pi_distribution_targ.entropy()
+            mean_targ_next_q_hist = []
+            tuned_indicator = np.zeros(q_pi_targ.shape)
 
-            # Adaptive Gamma:
-            #   Note: If not use adaptive_gamma, Ant-v2 tends to be overestimating.
-            if adaptive_gamma:
-                gamma = calculate_adaptive_gamma(q_pi_distribution_targ_entropy,
-                                                 beta=adap_gamma_beta, gamma_min=adap_gamma_min,
-                                                 gamma_max=adap_gamma_max, tolerable_entropy=adap_gamma_tolerable_entropy)
-            else:
-                gamma = fixed_gamma
-            backup_mu = r + gamma * (1-d) * q_pi_mu_targ
-            backup_log_std = (1-d) * q_pi_log_std_targ
-            # Note: It's crucial to discount Standard Deviation too, otherwise high SD will be incorporated
-            #    into online critic. We can also see this as an accumulated uncertainty.
-            backup_std = gamma * torch.exp(backup_log_std)
+            threshold = 1  # thresold=1 works for HalfCheetahBulletEnv-v0
 
-            if dist_type == 'Normal':
-                backup_distribution = Normal(backup_mu, backup_std)
-            elif dist_type == 'Laplace':
-                backup_distribution = Laplace(backup_mu, backup_std)
-            backup = backup_mu
+            # New threshold
+            for i in range(len(batch_hist['targ_next_q_hist'])):
+                tmp_batch_hist = np.asarray(batch_hist['targ_next_q_hist'][i])
+                tmp_batch_hist = np.append(tmp_batch_hist, q_pi_targ[i].item())  # add new prediction
+                change_rate = tmp_batch_hist[1:] - tmp_batch_hist[:-1]
 
-        kl_loss = torch.diag(torch.distributions.kl.kl_divergence(backup_distribution, q_distribution)).mean()
-        q_error = (q - backup)
-        q_mse = (q_error**2).mean()
-        # loss_q = kl_loss + q_log_std.mean()  # Not work for ReLU
-        # loss_q = kl_loss + torch.exp(q_log_std).mean()    # Not good for ReLU, because this will make both Mu and Std increase.
-        # loss_q = kl_loss + 1e-5*q_distribution.entropy().mean()
-        # loss_q = kl_loss
-        # Note: KL-Divergence can be minimized just by increase standard deviation, if not optimize the MSE of mu.
-        loss_q = q_mse + 1e-2*kl_loss
-        # loss_q = q_mse + 0.5*kl_loss + 0.01 * q_log_std.mean()
-        # loss_q = q_mse + torch.abs(q_error).mean()*kl_loss + q_log_std.mean()
-        # loss_q = q_mse
-        # import pdb; pdb.set_trace()
+                if len(tmp_batch_hist)==1:
+                    avg_window = tmp_batch_hist[-1]
+                else:
+                    if change_rate[-1] > threshold:
+                        avg_window = tmp_batch_hist[-2] + threshold
+                        # avg_window = tmp_batch_hist[-2]
+                        tuned_indicator[i] = 1
+                    else:
+                        avg_window = tmp_batch_hist[-1]
+                mean_targ_next_q_hist.append(avg_window)
 
+            # if t>10000:
+            #     import pdb; pdb.set_trace()
+            avg_q_pi_targ = torch.as_tensor(mean_targ_next_q_hist, dtype=torch.float32).to(device)
+
+            backup = r + gamma * (1 - d) * avg_q_pi_targ
+            # backup = r + gamma * (1 - d) * q_pi_targ
+        # import pdb;
+        # pdb.set_trace()
+
+        # MSE loss against Bellman backup
+        loss_q = ((q - backup)**2).mean()
 
         # Useful info for logging
-        if adaptive_gamma:
-            gamma_vals = gamma.detach().cpu().numpy()
-        else:
-            gamma_vals = gamma
-        loss_info = dict(QMuVals=q_mu.detach().cpu().numpy(),
-                         QStdVals=(gamma * torch.exp(q_log_std)).detach().cpu().numpy(),
-                         QLogStdVals=q_log_std.detach().cpu().numpy(),
-                         QHidActivation=torch.cat(q_hid_activation, dim=1).detach().cpu().numpy(),
-                         QMSE=q_mse.detach().cpu().numpy(),
-                         QError=q_error.detach().cpu().numpy(),
-                         QEntropy=q_distribution.entropy().detach().cpu().numpy(),
-                         QKLDiv=kl_loss.detach().cpu().numpy(),
-                         RVals=r.detach().cpu().numpy(),
-                         Gamma=gamma_vals,
-                         Entropy=q_pi_distribution_targ_entropy.detach().cpu().numpy())
+        loss_info = dict(QVals=q.cpu().detach().numpy(), TunedNum=tuned_indicator.sum(), THLD=threshold)
 
-        return loss_q, loss_info
+        return loss_q, loss_info, q, backup, avg_q_pi_targ, tuned_indicator  # Crucial log shapped q_pi_targ to history
 
     # Set up function for computing DDPG pi loss
     def compute_loss_pi(data):
-        o_ = data['obs']
-        a_, a_hid_activation = ac.pi(o_)
-        q_pi_mu, q_pi_log_std, q_pi_distribution, _ = ac.q(o_, a_)
-        # loss_pi = -q_pi_mu.mean() - q_pi_log_std.mean()
-        # loss_pi = -q_pi_mu.mean() - torch.exp(q_pi_log_std).mean() # Bad choice
-        loss_pi = -q_pi_mu.mean() - q_pi_distribution.entropy().mean()
-        # loss_pi = -q_pi_mu.mean()    # Maximum expectation
-        return loss_pi
+        o = data['obs']
+        q_pi = ac.q(o, ac.pi(o))
+        return -q_pi.mean()
 
     # Set up optimizers for policy and q-function
     pi_optimizer = Adam(ac.pi.parameters(), lr=pi_lr)
@@ -372,10 +303,10 @@ def ddpg(env_name, partially_observable=False,
     # Set up model saving
     logger.setup_pytorch_saver(ac)
 
-    def update(data):
+    def update(data, batch_hist, t):
         # First run one gradient descent step for Q.
         q_optimizer.zero_grad()
-        loss_q, loss_info = compute_loss_q(data)
+        loss_q, loss_info, q, backup, q_pi_targ, tuned_indicator = compute_loss_q(data, batch_hist, t)
         loss_q.backward()
         q_optimizer.step()
 
@@ -397,7 +328,9 @@ def ddpg(env_name, partially_observable=False,
         # Record things
         logger.store(LossQ=loss_q.item(), LossPi=loss_pi.item(), **loss_info)
 
-        # Finally, update target networks by polyak averaging.
+        # Finally, update target networks by polyak averaging. (Common choice: 0.995)
+        # # TODO: remove later
+        # polyak = 0.4
         with torch.no_grad():
             for p, p_targ in zip(ac.parameters(), ac_targ.parameters()):
                 # NB: We use an in-place operations "mul_", "add_" to update target
@@ -405,8 +338,10 @@ def ddpg(env_name, partially_observable=False,
                 p_targ.data.mul_(polyak)
                 p_targ.data.add_((1 - polyak) * p.data)
 
+        return q.cpu().detach().numpy(), backup.cpu().detach().numpy(), q_pi_targ.cpu().detach().numpy(), tuned_indicator
+
     def get_action(o, noise_scale):
-        a = ac.act(torch.as_tensor(o, dtype=torch.float32).to(DEVICE))
+        a = ac.act(torch.as_tensor(o, dtype=torch.float32).to(device))
         a += noise_scale * np.random.randn(act_dim)
         return np.clip(a, -act_limit, act_limit)
 
@@ -461,17 +396,24 @@ def ddpg(env_name, partially_observable=False,
         # Update handling
         if t >= update_after and t % update_every == 0:
             for _ in range(update_every):
-                batch = replay_buffer.sample_batch(batch_size)
-                batch = {k: v.to(DEVICE) for k, v in batch.items()}
-                update(data=batch)
+                sample_type = 'pseudo_random'  # 'pseudo_random'  genuine_random
+                batch, batch_hist, batch_idxs = replay_buffer.sample_batch(batch_size, device=device, sample_type=sample_type)
+                q, backup, q_pi_targ, tuned_indicator = update(data=batch, batch_hist=batch_hist, t=t)
+                replay_buffer.add_sample_hist(batch_idxs, q, backup, q_pi_targ, tuned_indicator, t)
 
         # End of epoch handling
         if (t+1) % steps_per_epoch == 0:
             epoch = (t+1) // steps_per_epoch
 
-            # Save model
-            if (epoch % save_freq == 0) or (epoch == epochs):
-                logger.save_state({'env': env}, None)
+            # # Save model
+            # fpath = osp.join(logger.output_dir, 'pyt_save')
+            # os.makedirs(fpath, exist_ok=True)
+            # context_fname = 'checkpoint-context-' + (
+            #     'Step-%d' % t if t is not None else '') + '.pt'
+            # context_fname = osp.join(fpath, context_fname)
+            # if (epoch % save_freq == 0) or (epoch == epochs):
+            #     logger.save_state({'env': env}, None)
+            #     torch.save({'replay_buffer': replay_buffer}, context_fname)
 
             # Test the performance of the deterministic version of the agent.
             test_agent()
@@ -483,19 +425,11 @@ def ddpg(env_name, partially_observable=False,
             logger.log_tabular('EpLen', average_only=True)
             logger.log_tabular('TestEpLen', average_only=True)
             logger.log_tabular('TotalEnvInteracts', t)
-            logger.log_tabular('QMuVals', with_min_and_max=True)
-            logger.log_tabular('QStdVals', with_min_and_max=True)
-            logger.log_tabular('QLogStdVals', with_min_and_max=True)
-            logger.log_tabular('QHidActivation', with_min_and_max=True)
-            logger.log_tabular('QMSE', with_min_and_max=True)
-            logger.log_tabular('QError', with_min_and_max=True)
-            logger.log_tabular('QEntropy', with_min_and_max=True)
-            logger.log_tabular('QKLDiv', with_min_and_max=True)
-            logger.log_tabular('RVals', with_min_and_max=True)
-            logger.log_tabular('Gamma', with_min_and_max=True)
-            logger.log_tabular('Entropy', with_min_and_max=True)
+            logger.log_tabular('QVals', with_min_and_max=True)
             logger.log_tabular('LossPi', average_only=True)
             logger.log_tabular('LossQ', average_only=True)
+            logger.log_tabular('TunedNum', with_min_and_max=True)
+            logger.log_tabular('THLD', with_min_and_max=True)
             logger.log_tabular('Time', time.time()-start_time)
             logger.dump_tabular()
 
@@ -526,15 +460,9 @@ if __name__ == '__main__':
     parser.add_argument('--flicker_prob', type=float, default=0.2)
     parser.add_argument('--random_noise_sigma', type=float, default=0.1)
     parser.add_argument('--random_sensor_missing_prob', type=float, default=0.1)
-    parser.add_argument('--dist_type', choices=['Normal', 'Laplace'], default='Normal')
-    parser.add_argument('--adaptive_gamma', type=str2bool, nargs='?', const=True, default=True, help="Use adaptive gamma")
-    parser.add_argument('--adap_gamma_beta', type=float, default=0.1)
-    parser.add_argument('--adap_gamma_min', type=float, default=0)
-    parser.add_argument('--adap_gamma_max', type=float, default=0.99)
-    parser.add_argument('--adap_gamma_tolerable_entropy', type=float, default=3)
     parser.add_argument('--hid', type=int, default=256)
-    parser.add_argument('--l', type=int, default=2)
-    parser.add_argument('--fixed_gamma', type=float, default=0.99)
+    parser.add_argument('--l', type=int, default=3)
+    parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--exp_name', type=str, default='ddpg')
@@ -543,9 +471,14 @@ if __name__ == '__main__':
 
     # Set log data saving directory
     from spinup.utils.run_utils import setup_logger_kwargs
+    # data_dir = osp.join(
+    #     osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
+    #     args.data_dir)
     data_dir = osp.join(
-        osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
+        osp.dirname("D:\spinup_new_data"),
         args.data_dir)
+
+    # import pdb; pdb.set_trace()
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
 
     ddpg(env_name=args.env, partially_observable=args.partially_observable,
@@ -553,13 +486,7 @@ if __name__ == '__main__':
          flicker_prob=args.flicker_prob,
          random_noise_sigma=args.random_noise_sigma,
          random_sensor_missing_prob=args.random_sensor_missing_prob,
-         dist_type=args.dist_type,
-         adaptive_gamma=args.adaptive_gamma,
-         adap_gamma_beta=args.adap_gamma_beta,
-         adap_gamma_min=args.adap_gamma_min,
-         adap_gamma_max=args.adap_gamma_max,
-         adap_gamma_tolerable_entropy=args.adap_gamma_tolerable_entropy,
          actor_critic=core.MLPActorCritic,
          ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), 
-         fixed_gamma=args.fixed_gamma, seed=args.seed, epochs=args.epochs,
+         gamma=args.gamma, seed=args.seed, epochs=args.epochs,
          logger_kwargs=logger_kwargs)

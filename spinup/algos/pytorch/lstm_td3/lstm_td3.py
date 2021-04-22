@@ -7,7 +7,7 @@ import time
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from spinup.utils.logx import EpochLogger, colorize
+from spinup.utils.mpi_logx import EpochLogger, colorize
 import itertools
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 from spinup.utils.mpi_tools import proc_id

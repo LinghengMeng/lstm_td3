@@ -7,7 +7,7 @@ import gym
 import pybulletgym
 import time
 import spinup.algos.pytorch.ddpg_sparse.core as core
-from spinup.utils.logx import EpochLogger
+from spinup.utils.mpi_logx import EpochLogger
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
 

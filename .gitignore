@@ -9,3 +9,7 @@ data/
 .DS_Store
 _build/
 *.sh
+
+spinup/algos/pytorch/ddpg/Untitled222.ipynb
+
+spinup/algos/pytorch/ddpg/.ipynb_checkpoints/Untitled222-checkpoint.ipynb
