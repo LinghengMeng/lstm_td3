@@ -19,7 +19,7 @@ tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 # from spinup.algos.pytorch.vpg.vpg import vpg as vpg_pytorch
 
 # Loggers
-from spinup.utils.mpi_logx import Logger, EpochLogger
+# from spinup.utils.mpi_logx import Logger, EpochLogger
 
 # Version
 from spinup.version import __version__
