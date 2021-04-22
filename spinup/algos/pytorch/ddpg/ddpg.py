@@ -31,6 +31,7 @@ class ReplayBuffer:
         self.pred_q_buf = {i: [] for i in range(size)}
         self.targ_q_buf = {i: [] for i in range(size)}
         self.targ_next_q_buf = {i: [] for i in range(size)}
+        self.hist_tuned_indicator_buf = {i: [] for i in range(size)}
         self.sampled_time_buf = {i: [] for i in range(size)}    # indicate when the sample is sampled
 
     def store(self, obs, act, rew, next_obs, done):
@@ -42,12 +43,13 @@ class ReplayBuffer:
         self.ptr = (self.ptr+1) % self.max_size
         self.size = min(self.size+1, self.max_size)
 
-    def add_sample_hist(self, sample_idxs, pred_q, targ_q, targ_next_q, t):
+    def add_sample_hist(self, sample_idxs, pred_q, targ_q, targ_next_q, tuned_indicator, t):
         """Add prediction history."""
         for i in range(len(sample_idxs)):
             self.pred_q_buf[sample_idxs[i]].append(pred_q[i])
             self.targ_q_buf[sample_idxs[i]].append(targ_q[i])
             self.targ_next_q_buf[sample_idxs[i]].append(targ_next_q[i])
+            self.hist_tuned_indicator_buf[sample_idxs[i]].append(tuned_indicator[i])
             self.sampled_time_buf[sample_idxs[i]].append(t)
 
     def sample_batch(self, batch_size=32, device=None, sample_type='genuine_random'):
@@ -254,56 +256,60 @@ def ddpg(env_name, partially_observable=False,
         # Bellman backup for Q function
         with torch.no_grad():
             q_pi_targ = ac_targ.q(o2, ac_targ.pi(o2))
+            # if t < 50000:
             # Average over historically predicted q-values
             window_size = 10
             mean_targ_next_q_hist = []
+            tuned_indicator = np.zeros(q_pi_targ.shape)
+            batch_change_rate = []
             for i in range(len(batch_hist['targ_next_q_hist'])):
-                # ############################################################################################
-                # # # Add 0 if not exist history
-                # # # Note: rather than init with 0 init with reward of next reward?
-                # # if not batch_hist['targ_next_q_hist'][i]:
-                # #     batch_hist['targ_next_q_hist'][i].append(0)
-                #     # import pdb; pdb.set_trace()
-                # batch_hist['targ_next_q_hist'][i].append(q_pi_targ[i].item())
-                # tmp_window_size = min(window_size, len(batch_hist['targ_next_q_hist'][i]))
-                # agv_window = np.asarray(batch_hist['targ_next_q_hist'][i])[-tmp_window_size:].mean()
-                # # agv_window = np.asarray(batch_hist['targ_next_q_hist'][i])[-tmp_window_size:].min()
-                # mean_targ_next_q_hist.append(agv_window)
-                # ############################################################################################
-                # # Add current prediction
-                # batch_hist['targ_next_q_hist'][i].append(q_pi_targ[i].item())
-                # batch_hist['sampled_time_hist'][i].append(t)
-                # if window_size is not None:
-                #     tmp_window_size = min(window_size, len(batch_hist['targ_next_q_hist'][i]))
-                # else:
-                #     tmp_window_size = len(batch_hist['targ_next_q_hist'][i])
-                # weight = np.asarray(batch_hist['sampled_time_hist'][i])[-tmp_window_size:] / np.asarray(batch_hist['sampled_time_hist'][i])[-tmp_window_size:].sum()
-                # agv_window = (weight * np.asarray(batch_hist['targ_next_q_hist'][i])[-tmp_window_size:]).sum()
-                # mean_targ_next_q_hist.append(agv_window)
-                ################################################################################################
-                batch_hist['targ_next_q_hist'][i].append(q_pi_targ[i].item())
-                targ_next_q_hist = np.asarray(batch_hist['targ_next_q_hist'][i])
-                change_rate = targ_next_q_hist[1:] - targ_next_q_hist[:-1]
-                if len(targ_next_q_hist)==1:
-                    avg_window = batch_hist['targ_next_q_hist'][i][-1]
-                else:
-                    threshold = 0.001  # thresold=1 works for HalfCheetahBulletEnv-v0
-                    # if np.abs(change_rate[-1]) > threshold:
-                    if change_rate[-1] > threshold:
-                        # if np.sign(change_rate[-1]) == 1:
-                        #     avg_window = batch_hist['targ_next_q_hist'][i][-2] + np.sign(
-                        #         batch_hist['targ_next_q_hist'][i][-1]) * threshold
-                        # else:
-                        #     avg_window = batch_hist['targ_next_q_hist'][i][-2]+10*np.sign(batch_hist['targ_next_q_hist'][i][-1])*threshold
-                        avg_window = batch_hist['targ_next_q_hist'][i][-2]
-                    else:
-                        avg_window = batch_hist['targ_next_q_hist'][i][-1]
-                    # import pdb; pdb.set_trace()
-                mean_targ_next_q_hist.append(avg_window)
-            # if t>2000:
-            #     import pdb; pdb.set_trace()
+                tmp_batch_hist = np.asarray(batch_hist['targ_next_q_hist'][i])
+                tmp_batch_hist = np.append(tmp_batch_hist, q_pi_targ[i].item())  # add new prediction
+                change_rate = tmp_batch_hist[1:] - tmp_batch_hist[:-1]
 
+                if len(tmp_batch_hist)==1:
+                    batch_change_rate.append(None)
+                else:
+                    batch_change_rate.append(change_rate[-1])
+
+            batch_change_rate = np.asarray(batch_change_rate).astype(float)
+            not_nan_idxs = np.argwhere(~np.isnan(batch_change_rate))
+            sorted_not_nan_idxs = np.argsort(batch_change_rate[not_nan_idxs.flatten()])
+            threshold_percentile = 75    # 25, 50, 75
+            if len(sorted_not_nan_idxs) != 0:
+                threshold = np.percentile(batch_change_rate[not_nan_idxs[sorted_not_nan_idxs]], threshold_percentile)
+                if threshold < 0:
+                    threshold = 0
+            else:
+                threshold = 1
+            # threshold = 1  # thresold=1 works for HalfCheetahBulletEnv-v0
+
+            # New threshold
+            for i in range(len(batch_hist['targ_next_q_hist'])):
+                tmp_batch_hist = np.asarray(batch_hist['targ_next_q_hist'][i])
+                tmp_batch_hist = np.append(tmp_batch_hist, q_pi_targ[i].item())  # add new prediction
+                change_rate = tmp_batch_hist[1:] - tmp_batch_hist[:-1]
+
+                if len(tmp_batch_hist)==1:
+                    avg_window = tmp_batch_hist[-1]
+                else:
+                    if change_rate[-1] > threshold:
+                        avg_window = tmp_batch_hist[-2] + threshold
+                        # avg_window = tmp_batch_hist[-2]
+                        tuned_indicator[i] = 1
+                    else:
+                        avg_window = tmp_batch_hist[-1]
+                mean_targ_next_q_hist.append(avg_window)
+            # print(batch_change_rate[not_nan_idxs[sorted_not_nan_idxs]])
+            # import pdb; pdb.set_trace()
+
+            # if t>10000:
+            #     import pdb; pdb.set_trace()
             avg_q_pi_targ = torch.as_tensor(mean_targ_next_q_hist, dtype=torch.float32).to(device)
+
+            # else:
+            #     avg_q_pi_targ = q_pi_targ
+            #     tuned_indicator = np.zeros(q_pi_targ.shape)
             backup = r + gamma * (1 - d) * avg_q_pi_targ
             # backup = r + gamma * (1 - d) * q_pi_targ
         # import pdb;
@@ -313,9 +319,9 @@ def ddpg(env_name, partially_observable=False,
         loss_q = ((q - backup)**2).mean()
 
         # Useful info for logging
-        loss_info = dict(QVals=q.cpu().detach().numpy(), AdaptGamma=gamma_)
+        loss_info = dict(QVals=q.cpu().detach().numpy(), TunedNum=tuned_indicator.sum(), THLD=threshold)
 
-        return loss_q, loss_info, q, backup, q_pi_targ
+        return loss_q, loss_info, q, backup, avg_q_pi_targ, tuned_indicator  # Crucial log shapped q_pi_targ to history
 
     # Set up function for computing DDPG pi loss
     def compute_loss_pi(data):
@@ -333,7 +339,7 @@ def ddpg(env_name, partially_observable=False,
     def update(data, batch_hist, t):
         # First run one gradient descent step for Q.
         q_optimizer.zero_grad()
-        loss_q, loss_info, q, backup, q_pi_targ = compute_loss_q(data, batch_hist, t)
+        loss_q, loss_info, q, backup, q_pi_targ, tuned_indicator = compute_loss_q(data, batch_hist, t)
         loss_q.backward()
         q_optimizer.step()
 
@@ -355,14 +361,17 @@ def ddpg(env_name, partially_observable=False,
         # Record things
         logger.store(LossQ=loss_q.item(), LossPi=loss_pi.item(), **loss_info)
 
-        # Finally, update target networks by polyak averaging.
+        # Finally, update target networks by polyak averaging. (Common choice: 0.995)
+        # # TODO: remove later
+        # polyak = 0.4
         with torch.no_grad():
             for p, p_targ in zip(ac.parameters(), ac_targ.parameters()):
                 # NB: We use an in-place operations "mul_", "add_" to update target
                 # params, as opposed to "mul" and "add", which would make new tensors.
                 p_targ.data.mul_(polyak)
                 p_targ.data.add_((1 - polyak) * p.data)
-        return q.cpu().detach().numpy(), backup.cpu().detach().numpy(), q_pi_targ.cpu().detach().numpy()
+
+        return q.cpu().detach().numpy(), backup.cpu().detach().numpy(), q_pi_targ.cpu().detach().numpy(), tuned_indicator
 
     def get_action(o, noise_scale):
         a = ac.act(torch.as_tensor(o, dtype=torch.float32).to(device))
@@ -400,12 +409,6 @@ def ddpg(env_name, partially_observable=False,
         ep_ret += r
         ep_len += 1
 
-        # GAMMA_MAX = 0.99
-        # GAMMA_MIN= 0.8
-        # GAMMA_DECAY_NUM = 100000
-        # gamma_ = np.minimum(GAMMA_MIN + t*(GAMMA_MAX - GAMMA_MIN)/GAMMA_DECAY_NUM, GAMMA_MAX)
-        gamma_ = gamma
-
         # Ignore the "done" signal if it comes from hitting the time
         # horizon (that is, when it's an artificial terminal signal
         # that isn't based on the agent's state)
@@ -426,21 +429,21 @@ def ddpg(env_name, partially_observable=False,
         # Update handling
         if t >= update_after and t % update_every == 0:
             for _ in range(update_every):
-                sample_type = 'genuine_random'  # 'pseudo_random'  genuine_random
+                sample_type = 'pseudo_random'  # 'pseudo_random'  genuine_random
                 batch, batch_hist, batch_idxs = replay_buffer.sample_batch(batch_size, device=device, sample_type=sample_type)
-                q, backup, q_pi_targ = update(data=batch, batch_hist=batch_hist, t=t)
-                replay_buffer.add_sample_hist(batch_idxs, q, backup, q_pi_targ, t)
+                q, backup, q_pi_targ, tuned_indicator = update(data=batch, batch_hist=batch_hist, t=t)
+                replay_buffer.add_sample_hist(batch_idxs, q, backup, q_pi_targ, tuned_indicator, t)
 
         # End of epoch handling
         if (t+1) % steps_per_epoch == 0:
             epoch = (t+1) // steps_per_epoch
 
-            # Save model
-            fpath = osp.join(logger.output_dir, 'pyt_save')
-            os.makedirs(fpath, exist_ok=True)
-            context_fname = 'checkpoint-context-' + (
-                'Step-%d' % t if t is not None else '') + '.pt'
-            context_fname = osp.join(fpath, context_fname)
+            # # Save model
+            # fpath = osp.join(logger.output_dir, 'pyt_save')
+            # os.makedirs(fpath, exist_ok=True)
+            # context_fname = 'checkpoint-context-' + (
+            #     'Step-%d' % t if t is not None else '') + '.pt'
+            # context_fname = osp.join(fpath, context_fname)
             # if (epoch % save_freq == 0) or (epoch == epochs):
             #     logger.save_state({'env': env}, None)
             #     torch.save({'replay_buffer': replay_buffer}, context_fname)
@@ -456,9 +459,10 @@ def ddpg(env_name, partially_observable=False,
             logger.log_tabular('TestEpLen', average_only=True)
             logger.log_tabular('TotalEnvInteracts', t)
             logger.log_tabular('QVals', with_min_and_max=True)
-            logger.log_tabular('AdaptGamma', with_min_and_max=True)
             logger.log_tabular('LossPi', average_only=True)
             logger.log_tabular('LossQ', average_only=True)
+            logger.log_tabular('TunedNum', with_min_and_max=True)
+            logger.log_tabular('THLD', with_min_and_max=True)
             logger.log_tabular('Time', time.time()-start_time)
             logger.dump_tabular()
 
@@ -500,12 +504,12 @@ if __name__ == '__main__':
 
     # Set log data saving directory
     from spinup.utils.run_utils import setup_logger_kwargs
-    data_dir = osp.join(
-        osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
-        args.data_dir)
     # data_dir = osp.join(
-    #     osp.dirname("D:\spinup_new_data"),
+    #     osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
     #     args.data_dir)
+    data_dir = osp.join(
+        osp.dirname("D:\spinup_new_data"),
+        args.data_dir)
 
     # import pdb; pdb.set_trace()
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
