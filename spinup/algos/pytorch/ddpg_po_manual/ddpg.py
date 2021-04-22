@@ -8,7 +8,7 @@ import pybulletgym
 import pybullet_envs
 import time
 import spinup.algos.pytorch.ddpg_po_manual.core as core
-from spinup.utils.mpi_logx import EpochLogger
+from spinup.utils.logx import EpochLogger, setup_logger_kwargs
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
 import os
@@ -113,6 +113,7 @@ class ReplayBuffer:
 def ddpg(env_name, partially_observable=False,
          pomdp_type = 'remove_velocity',
          flicker_prob=0.2, random_noise_sigma=0.1, random_sensor_missing_prob=0.1,
+         change_rate_threshold = 1,
          actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
          steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99, 
          polyak=0.995, pi_lr=1e-3, q_lr=1e-3, batch_size=100, start_steps=10000, 
@@ -254,9 +255,7 @@ def ddpg(env_name, partially_observable=False,
             mean_targ_next_q_hist = []
             tuned_indicator = np.zeros(q_pi_targ.shape)
 
-            threshold = 1  # thresold=1 works for HalfCheetahBulletEnv-v0
-
-            # New threshold
+            # Calculate change rate and clip based on threshold
             for i in range(len(batch_hist['targ_next_q_hist'])):
                 tmp_batch_hist = np.asarray(batch_hist['targ_next_q_hist'][i])
                 tmp_batch_hist = np.append(tmp_batch_hist, q_pi_targ[i].item())  # add new prediction
@@ -265,9 +264,8 @@ def ddpg(env_name, partially_observable=False,
                 if len(tmp_batch_hist)==1:
                     avg_window = tmp_batch_hist[-1]
                 else:
-                    if change_rate[-1] > threshold:
-                        avg_window = tmp_batch_hist[-2] + threshold
-                        # avg_window = tmp_batch_hist[-2]
+                    if change_rate[-1] > change_rate_threshold:
+                        avg_window = tmp_batch_hist[-2] + change_rate_threshold
                         tuned_indicator[i] = 1
                     else:
                         avg_window = tmp_batch_hist[-1]
@@ -286,7 +284,8 @@ def ddpg(env_name, partially_observable=False,
         loss_q = ((q - backup)**2).mean()
 
         # Useful info for logging
-        loss_info = dict(QVals=q.cpu().detach().numpy(), TunedNum=tuned_indicator.sum(), THLD=threshold)
+        loss_info = dict(QVals=q.cpu().detach().numpy(), TunedNum=tuned_indicator.sum(),
+                         THLD=change_rate_threshold)
 
         return loss_q, loss_info, q, backup, avg_q_pi_targ, tuned_indicator  # Crucial log shapped q_pi_targ to history
 
@@ -460,6 +459,7 @@ if __name__ == '__main__':
     parser.add_argument('--flicker_prob', type=float, default=0.2)
     parser.add_argument('--random_noise_sigma', type=float, default=0.1)
     parser.add_argument('--random_sensor_missing_prob', type=float, default=0.1)
+    parser.add_argument('--change_rate_threshold', type=float, default=1)
     parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=3)
     parser.add_argument('--gamma', type=float, default=0.99)
@@ -470,13 +470,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Set log data saving directory
-    from spinup.utils.run_utils import setup_logger_kwargs
-    # data_dir = osp.join(
-    #     osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
-    #     args.data_dir)
     data_dir = osp.join(
-        osp.dirname("D:\spinup_new_data"),
+        osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
         args.data_dir)
+    # data_dir = osp.join(
+    #     osp.dirname("D:\spinup_new_data"),
+    #     args.data_dir)
 
     # import pdb; pdb.set_trace()
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
@@ -486,6 +485,7 @@ if __name__ == '__main__':
          flicker_prob=args.flicker_prob,
          random_noise_sigma=args.random_noise_sigma,
          random_sensor_missing_prob=args.random_sensor_missing_prob,
+         change_rate_threshold=args.change_rate_threshold,
          actor_critic=core.MLPActorCritic,
          ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), 
          gamma=args.gamma, seed=args.seed, epochs=args.epochs,
