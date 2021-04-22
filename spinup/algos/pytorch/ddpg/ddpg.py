@@ -8,7 +8,7 @@ import pybulletgym
 import pybullet_envs
 import time
 import spinup.algos.pytorch.ddpg.core as core
-from spinup.utils.logx import EpochLogger
+from spinup.utils.logx import EpochLogger, setup_logger_kwargs
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
 import os
@@ -313,7 +313,7 @@ def ddpg(env_name, partially_observable=False,
         loss_q = ((q - backup)**2).mean()
 
         # Useful info for logging
-        loss_info = dict(QVals=q.cpu().detach().numpy(), AdaptGamma=gamma_)
+        loss_info = dict(QVals=q.cpu().detach().numpy())
 
         return loss_q, loss_info, q, backup, q_pi_targ
 
@@ -399,12 +399,6 @@ def ddpg(env_name, partially_observable=False,
         o2, r, d, _ = env.step(a)
         ep_ret += r
         ep_len += 1
-
-        # GAMMA_MAX = 0.99
-        # GAMMA_MIN= 0.8
-        # GAMMA_DECAY_NUM = 100000
-        # gamma_ = np.minimum(GAMMA_MIN + t*(GAMMA_MAX - GAMMA_MIN)/GAMMA_DECAY_NUM, GAMMA_MAX)
-        gamma_ = gamma
 
         # Ignore the "done" signal if it comes from hitting the time
         # horizon (that is, when it's an artificial terminal signal
@@ -499,7 +493,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Set log data saving directory
-    from spinup.utils.run_utils import setup_logger_kwargs
     data_dir = osp.join(
         osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
         args.data_dir)
