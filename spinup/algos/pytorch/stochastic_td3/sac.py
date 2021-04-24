@@ -233,7 +233,8 @@ def sac(env_name, partially_observable=False,
         # Entropy-regularized policy loss
         # loss_pi = (alpha * logp_pi - q_pi).mean()
         # loss_pi = (- q_pi).mean()
-        loss_pi = (logp_pi - q_pi).mean()
+        # loss_pi = (logp_pi - q_pi).mean()
+        loss_pi = (alpha * logp_pi - q_pi).mean()
 
         # Useful info for logging
         pi_info = dict(LogPi=logp_pi.cpu().detach().numpy())
