@@ -202,7 +202,21 @@ def sac(env_name, partially_observable=False,
         # Bellman backup for Q functions
         with torch.no_grad():
             # Target actions come from *current* policy
-            a2, logp_a2 = ac.pi(o2)
+            # a2, logp_a2, log_std_a2, a2_dist = ac.pi(o2)
+            a2, logp_a2, log_std_a2, a2_dist = ac_targ.pi(o2)
+
+            # sample_num = 500
+            # sampled_a2 = a2_dist.rsample(torch.Size([sample_num]))
+            # repeated_o2 = o2.repeat(sample_num, 1)
+            # reshaped_sample_a2 = torch.reshape(sampled_a2, (-1, 6))
+            #
+            # sampled_q1_pi = ac_targ.q1(repeated_o2, reshaped_sample_a2)
+            # avg_q1_pi_targ = torch.reshape(sampled_q1_pi, (sample_num, -1)).mean(axis=0)
+            # sampled_q2_pi = ac_targ.q2(repeated_o2, reshaped_sample_a2)
+            # avg_q2_pi_targ = torch.reshape(sampled_q2_pi, (sample_num, -1)).mean(axis=0)
+            # q_pi_targ = torch.min(avg_q1_pi_targ, avg_q2_pi_targ)
+            #
+            # backup = r + gamma * (1 - d) * q_pi_targ
 
             # Target Q-values
             q1_pi_targ = ac_targ.q1(o2, a2)
@@ -225,19 +239,30 @@ def sac(env_name, partially_observable=False,
     # Set up function for computing SAC pi loss
     def compute_loss_pi(data):
         o = data['obs']
-        pi, logp_pi = ac.pi(o)
+        pi, logp_pi, log_std, pi_dist = ac.pi(o)
+        # sample_num = 500
+        # sampled_pi = pi_dist.rsample(torch.Size([sample_num]))
+        # repeated_o = o.repeat(sample_num, 1)
+        # reshaped_sample_pi = torch.reshape(sampled_pi, (-1, 6))
+        #
+        # sampled_q = ac.q1(repeated_o, reshaped_sample_pi)
+        # avg_q1_pi = torch.reshape(sampled_q, (sample_num, -1)).mean(axis=0)
+        # loss_pi = (- avg_q1_pi).mean()
+
         q1_pi = ac.q1(o, pi)
         q2_pi = ac.q2(o, pi)
         q_pi = torch.min(q1_pi, q2_pi)
-
+        # import pdb; pdb.set_trace()
         # Entropy-regularized policy loss
         # loss_pi = (alpha * logp_pi - q_pi).mean()
         # loss_pi = (- q_pi).mean()
         # loss_pi = (logp_pi - q_pi).mean()
         loss_pi = (alpha * logp_pi - q_pi).mean()
+        # loss_pi = (1e-8*log_std.sum(axis=1) - q_pi).mean()
 
         # Useful info for logging
-        pi_info = dict(LogPi=logp_pi.cpu().detach().numpy())
+        pi_info = dict(LogPi=logp_pi.cpu().detach().numpy(),
+                       LogStdSum=log_std.sum(axis=1).cpu().detach().numpy())
 
         return loss_pi, pi_info
 
@@ -364,6 +389,7 @@ def sac(env_name, partially_observable=False,
             logger.log_tabular('Q2Vals', with_min_and_max=True)
             logger.log_tabular('LogPi', with_min_and_max=True)
             logger.log_tabular('LossPi', average_only=True)
+            logger.log_tabular('LogStdSum', average_only=True)
             logger.log_tabular('LossQ', average_only=True)
             logger.log_tabular('Time', time.time()-start_time)
             logger.dump_tabular()
