@@ -45,8 +45,7 @@ class ReplayBuffer:
 
 
 def td3(env_name, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
-        tune_reward_flag = False,
-        tune_rew_scale = 0.5,
+        tune_reward_type = None, tune_rew_addend = 0.5, tune_rew_multiplier = 0.5,
         steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99, 
         polyak=0.995, pi_lr=1e-3, q_lr=1e-3, batch_size=100, start_steps=10000, 
         update_after=1000, update_every=50, act_noise=0.1, target_noise=0.2, 
@@ -309,11 +308,13 @@ def td3(env_name, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
         d = False if ep_len==max_ep_len else d
 
         # Store experience to replay buffer
-        if tune_reward_flag:
-            tuned_rew = r - tune_rew_scale
-            replay_buffer.store(o, a, tuned_rew, o2, d)
+        if tune_reward_type == 'addition_tunning':
+            tuned_rew = r + tune_rew_addend
+        elif tune_reward_type == 'multiplication_tunning':
+            tuned_rew = r * tune_rew_multiplier
         else:
-            replay_buffer.store(o, a, r, o2, d)
+            tuned_rew = r
+        replay_buffer.store(o, a, tuned_rew, o2, d)
 
         # Super critical, easy to overlook step: make sure to update 
         # most recent observation!
@@ -377,8 +378,9 @@ if __name__ == '__main__':
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--tune_reward_flag', type=str2bool, nargs='?', const=True, default=False)
-    parser.add_argument('--tune_rew_scale', type=float, default=0)
+    parser.add_argument('--tune_reward_type', type=str, choices=['addition_tunning', 'multiplication_tunning'], default=None)
+    parser.add_argument('--tune_rew_addend', type=float, default=0)
+    parser.add_argument('--tune_rew_multiplier', type=float, default=0)
     parser.add_argument('--exp_name', type=str, default='td3')
     parser.add_argument("--data_dir", type=str, default='po_spinup_data')
     args = parser.parse_args()
@@ -390,7 +392,8 @@ if __name__ == '__main__':
 
     td3(env_name=args.env, actor_critic=core.MLPActorCritic,
         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l),
-        tune_reward_flag=args.tune_reward_flag,
-        tune_rew_scale=args.tune_rew_scale,
+        tune_reward_type=args.tune_reward_type,
+        tune_rew_addend=args.tune_rew_addend,
+        tune_rew_multiplier=args.tune_rew_multiplier,
         gamma=args.gamma, seed=args.seed, epochs=args.epochs,
         logger_kwargs=logger_kwargs)
