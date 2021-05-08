@@ -6,7 +6,7 @@ import pybulletgym
 import pybullet_envs
 import time
 import spinup.orig_algos.pytorch.ppo.core as core
-from spinup.utils.logx import EpochLogger
+from spinup.utils.logx import EpochLogger, setup_logger_kwargs
 from spinup.utils.tools import statistics_scalar
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
@@ -390,8 +390,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Set log data saving directory
-    from spinup.utils.run_utils import setup_logger_kwargs
-
     data_dir = osp.join(
         osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
         args.data_dir)
