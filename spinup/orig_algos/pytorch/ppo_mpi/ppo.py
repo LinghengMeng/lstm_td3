@@ -2,14 +2,12 @@ import numpy as np
 import torch
 from torch.optim import Adam
 import gym
-import pybulletgym
 import pybullet_envs
 import time
-import spinup.orig_algos.pytorch.ppo.core as core
+import spinup.orig_algos.pytorch.ppo_mpi.core as core
 from spinup.utils.logx import EpochLogger
-from spinup.utils.tools import statistics_scalar
-from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
-import os.path as osp
+from spinup.utils.mpi_pytorch import setup_pytorch_for_mpi, sync_params, mpi_avg_grads
+from spinup.utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs
 
 
 class PPOBuffer:
@@ -80,17 +78,15 @@ class PPOBuffer:
         assert self.ptr == self.max_size    # buffer has to be full before you can get
         self.ptr, self.path_start_idx = 0, 0
         # the next two lines implement the advantage normalization trick
-        adv_mean, adv_std = statistics_scalar(self.adv_buf)
+        adv_mean, adv_std = mpi_statistics_scalar(self.adv_buf)
         self.adv_buf = (self.adv_buf - adv_mean) / adv_std
         data = dict(obs=self.obs_buf, act=self.act_buf, ret=self.ret_buf,
                     adv=self.adv_buf, logp=self.logp_buf)
         return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in data.items()}
 
 
-def ppo(env_name, partially_observable=False,
-        pomdp_type = 'remove_velocity',
-        flicker_prob=0.2,  random_noise_sigma=0.1, random_sensor_missing_prob=0.1,
-        actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
+
+def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0, 
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
         vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, lam=0.97, max_ep_len=1000,
         target_kl=0.01, logger_kwargs=dict(), save_freq=10):
@@ -100,10 +96,8 @@ def ppo(env_name, partially_observable=False,
     with early stopping based on approximate KL
 
     Args:
-        env_name : A function which creates a copy of the environment.
+        env_fn : A function which creates a copy of the environment.
             The environment must satisfy the OpenAI Gym API.
-
-        partially_observable:
 
         actor_critic: The constructor method for a PyTorch Module with a 
             ``step`` method, an ``act`` method, a ``pi`` module, and a ``v`` 
@@ -199,32 +193,36 @@ def ppo(env_name, partially_observable=False,
 
     """
 
+    # Special function to avoid certain slowdowns from PyTorch + MPI combo.
+    setup_pytorch_for_mpi()
+
     # Set up logger and save configuration
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
 
     # Random seed
+    seed += 10000 * proc_id()
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     # Instantiate environment
-    # Wrapper environment if using POMDP
-    if partially_observable:
-        env = POMDPWrapper(env_name, pomdp_type, flicker_prob, random_noise_sigma, random_sensor_missing_prob)
-    else:
-        env = gym.make(env_name)
-    obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.shape[0]
+    env = env_fn()
+    obs_dim = env.observation_space.shape
+    act_dim = env.action_space.shape
 
     # Create actor-critic module
     ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
+
+    # Sync params across processes
+    sync_params(ac)
 
     # Count variables
     var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.v])
     logger.log('\nNumber of parameters: \t pi: %d, \t v: %d\n'%var_counts)
 
     # Set up experience buffer
-    buf = PPOBuffer(obs_dim, act_dim, steps_per_epoch, gamma, lam)
+    local_steps_per_epoch = int(steps_per_epoch / num_procs())
+    buf = PPOBuffer(obs_dim, act_dim, local_steps_per_epoch, gamma, lam)
 
     # Set up function for computing PPO policy loss
     def compute_loss_pi(data):
@@ -268,11 +266,12 @@ def ppo(env_name, partially_observable=False,
         for i in range(train_pi_iters):
             pi_optimizer.zero_grad()
             loss_pi, pi_info = compute_loss_pi(data)
-            kl = pi_info['kl']
+            kl = mpi_avg(pi_info['kl'])
             if kl > 1.5 * target_kl:
                 logger.log('Early stopping at step %d due to reaching max kl.'%i)
                 break
             loss_pi.backward()
+            mpi_avg_grads(ac.pi)    # average grads across MPI processes
             pi_optimizer.step()
 
         logger.store(StopIter=i)
@@ -282,6 +281,7 @@ def ppo(env_name, partially_observable=False,
             vf_optimizer.zero_grad()
             loss_v = compute_loss_v(data)
             loss_v.backward()
+            mpi_avg_grads(ac.v)    # average grads across MPI processes
             vf_optimizer.step()
 
         # Log changes from update
@@ -297,7 +297,7 @@ def ppo(env_name, partially_observable=False,
 
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
-        for t in range(steps_per_epoch):
+        for t in range(local_steps_per_epoch):
             a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
 
             next_o, r, d, _ = env.step(a)
@@ -313,7 +313,7 @@ def ppo(env_name, partially_observable=False,
 
             timeout = ep_len == max_ep_len
             terminal = d or timeout
-            epoch_ended = t==steps_per_epoch-1
+            epoch_ended = t==local_steps_per_epoch-1
 
             if terminal or epoch_ended:
                 if epoch_ended and not(terminal):
@@ -354,31 +354,11 @@ def ppo(env_name, partially_observable=False,
         logger.log_tabular('Time', time.time()-start_time)
         logger.dump_tabular()
 
-
-def str2bool(v):
-    """Function used in argument parser for converting string to bool."""
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ('yes', 'true', 't', 'y', '1'):
-        return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
-        return False
-    else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
-
-
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
-    parser.add_argument('--partially_observable', type=str2bool, nargs='?', const=True, default=False, help="Using POMDP")
-    parser.add_argument('--pomdp_type',
-                        choices=['remove_velocity', 'flickering', 'random_noise', 'random_sensor_missing'],
-                        default='remove_velocity')
-    parser.add_argument('--flicker_prob', type=float, default=0.2)
-    parser.add_argument('--random_noise_sigma', type=float, default=0.1)
-    parser.add_argument('--random_sensor_missing_prob', type=float, default=0.1)
-    parser.add_argument('--hid', type=int, default=256)
+    parser.add_argument('--hid', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
@@ -386,23 +366,14 @@ if __name__ == '__main__':
     parser.add_argument('--steps', type=int, default=4000)
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--exp_name', type=str, default='ppo_mpi')
-    parser.add_argument("--data_dir", type=str, default='spinup_data_lstm')
     args = parser.parse_args()
 
-    # Set log data saving directory
+    mpi_fork(args.cpu)  # run parallel code with mpi
+
     from spinup.utils.run_utils import setup_logger_kwargs
+    logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
 
-    data_dir = osp.join(
-        osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
-        args.data_dir)
-    logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
-
-    ppo(env_name=args.env, partially_observable=args.partially_observable,
-        pomdp_type=args.pomdp_type,
-        flicker_prob=args.flicker_prob,
-        random_noise_sigma=args.random_noise_sigma,
-        random_sensor_missing_prob=args.random_sensor_missing_prob,
-        actor_critic=core.MLPActorCritic,
+    ppo(lambda : gym.make(args.env), actor_critic=core.MLPActorCritic,
         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), gamma=args.gamma, 
         seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,
         logger_kwargs=logger_kwargs)
