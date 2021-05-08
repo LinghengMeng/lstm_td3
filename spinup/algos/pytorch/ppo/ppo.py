@@ -3,11 +3,11 @@ import torch
 from torch.optim import Adam
 import gym
 import pybulletgym
+import pybullet_envs
 import time
 import spinup.algos.pytorch.ppo.core as core
 from spinup.utils.logx import EpochLogger
-from spinup.utils.mpi_pytorch import setup_pytorch_for_mpi, sync_params, mpi_avg_grads
-from spinup.utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs
+from spinup.utils.tools import statistics_scalar
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
 import os.path as osp
 
@@ -80,7 +80,7 @@ class PPOBuffer:
         assert self.ptr == self.max_size    # buffer has to be full before you can get
         self.ptr, self.path_start_idx = 0, 0
         # the next two lines implement the advantage normalization trick
-        adv_mean, adv_std = mpi_statistics_scalar(self.adv_buf)
+        adv_mean, adv_std = statistics_scalar(self.adv_buf)
         self.adv_buf = (self.adv_buf - adv_mean) / adv_std
         data = dict(obs=self.obs_buf, act=self.act_buf, ret=self.ret_buf,
                     adv=self.adv_buf, logp=self.logp_buf)
@@ -199,15 +199,11 @@ def ppo(env_name, partially_observable=False,
 
     """
 
-    # Special function to avoid certain slowdowns from PyTorch + MPI combo.
-    setup_pytorch_for_mpi()
-
     # Set up logger and save configuration
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
 
     # Random seed
-    seed += 10000 * proc_id()
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -223,16 +219,12 @@ def ppo(env_name, partially_observable=False,
     # Create actor-critic module
     ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
 
-    # Sync params across processes
-    sync_params(ac)
-
     # Count variables
     var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.v])
     logger.log('\nNumber of parameters: \t pi: %d, \t v: %d\n'%var_counts)
 
     # Set up experience buffer
-    local_steps_per_epoch = int(steps_per_epoch / num_procs())
-    buf = PPOBuffer(obs_dim, act_dim, local_steps_per_epoch, gamma, lam)
+    buf = PPOBuffer(obs_dim, act_dim, steps_per_epoch, gamma, lam)
 
     # Set up function for computing PPO policy loss
     def compute_loss_pi(data):
@@ -276,12 +268,11 @@ def ppo(env_name, partially_observable=False,
         for i in range(train_pi_iters):
             pi_optimizer.zero_grad()
             loss_pi, pi_info = compute_loss_pi(data)
-            kl = mpi_avg(pi_info['kl'])
+            kl = pi_info['kl']
             if kl > 1.5 * target_kl:
                 logger.log('Early stopping at step %d due to reaching max kl.'%i)
                 break
             loss_pi.backward()
-            mpi_avg_grads(ac.pi)    # average grads across MPI processes
             pi_optimizer.step()
 
         logger.store(StopIter=i)
@@ -291,7 +282,6 @@ def ppo(env_name, partially_observable=False,
             vf_optimizer.zero_grad()
             loss_v = compute_loss_v(data)
             loss_v.backward()
-            mpi_avg_grads(ac.v)    # average grads across MPI processes
             vf_optimizer.step()
 
         # Log changes from update
@@ -307,7 +297,7 @@ def ppo(env_name, partially_observable=False,
 
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
-        for t in range(local_steps_per_epoch):
+        for t in range(steps_per_epoch):
             a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
 
             next_o, r, d, _ = env.step(a)
@@ -323,7 +313,7 @@ def ppo(env_name, partially_observable=False,
 
             timeout = ep_len == max_ep_len
             terminal = d or timeout
-            epoch_ended = t==local_steps_per_epoch-1
+            epoch_ended = t==steps_per_epoch-1
 
             if terminal or epoch_ended:
                 if epoch_ended and not(terminal):
@@ -392,14 +382,12 @@ if __name__ == '__main__':
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--cpu', type=int, default=4)
+    parser.add_argument('--cpu', type=int, default=1)
     parser.add_argument('--steps', type=int, default=4000)
-    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--exp_name', type=str, default='ppo')
     parser.add_argument("--data_dir", type=str, default='spinup_data_lstm')
     args = parser.parse_args()
-
-    mpi_fork(args.cpu)  # run parallel code with mpi
 
     # Set log data saving directory
     from spinup.utils.run_utils import setup_logger_kwargs
