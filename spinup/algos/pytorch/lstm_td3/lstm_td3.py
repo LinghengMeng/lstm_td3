@@ -7,16 +7,15 @@ import time
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from spinup.utils.mpi_logx import EpochLogger, colorize
+from spinup.utils.logx import EpochLogger, setup_logger_kwargs, colorize
 import itertools
 from spinup.env_wrapper.pomdp_wrapper import POMDPWrapper
-from spinup.utils.mpi_tools import proc_id
 import os
 import os.path as osp
 import json
 from collections import namedtuple
 
-DEVICE = "cpu"  # "cuda"
+DEVICE = "cuda"  # "cuda" "cpu"
 
 
 class ReplayBuffer:
@@ -67,57 +66,36 @@ class ReplayBuffer:
             hist_act = np.zeros([batch_size, 1, self.act_dim])
             hist_obs2 = np.zeros([batch_size, 1, self.obs_dim])
             hist_act2 = np.zeros([batch_size, 1, self.act_dim])
-            hist_rew = np.zeros([batch_size, 1])
-            hist_done = np.zeros([batch_size, 1])
-            hist_len = np.zeros(batch_size)
+            hist_obs_len = np.zeros(batch_size)
+            hist_obs2_len = np.zeros(batch_size)
         else:
             hist_obs = np.zeros([batch_size, max_hist_len, self.obs_dim])
             hist_act = np.zeros([batch_size, max_hist_len, self.act_dim])
+            hist_obs_len = max_hist_len * np.ones(batch_size)
             hist_obs2 = np.zeros([batch_size, max_hist_len, self.obs_dim])
             hist_act2 = np.zeros([batch_size, max_hist_len, self.act_dim])
-            hist_rew = np.zeros([batch_size, max_hist_len])
-            hist_done = np.zeros([batch_size, max_hist_len])
-            hist_len = max_hist_len * np.ones(batch_size)
+            hist_obs2_len = max_hist_len * np.ones(batch_size)
+
             # Extract history experiences before sampled index
-            for hist_i in range(max_hist_len):
-                hist_obs[:, -1 - hist_i, :] = self.obs_buf[idxs - hist_i - 1, :]
-                hist_act[:, -1 - hist_i, :] = self.act_buf[idxs - hist_i - 1, :]
-                hist_obs2[:, -1 - hist_i, :] = self.obs2_buf[idxs - hist_i - 1, :]
-                hist_act2[:, -1 - hist_i, :] = self.act_buf[idxs - hist_i, :]  # include a_t
-                hist_rew[:, -1 - hist_i] = self.rew_buf[idxs - hist_i - 1]
-                hist_done[:, -1 - hist_i] = self.done_buf[idxs - hist_i - 1]
-            # If there is done in the backward experiences, only consider the experiences after the last done.
-            for batch_i in range(batch_size):
-                done_idxs_exclude_last_exp = np.where(hist_done[batch_i][:-1] == 1)  # Exclude last experience
-                # If exist done
-                if done_idxs_exclude_last_exp[0].size != 0:
-                    largest_done_id = done_idxs_exclude_last_exp[0][-1]
-                    hist_len[batch_i] = max_hist_len - (largest_done_id + 1)
+            for i, id in enumerate(idxs):
+                hist_start_id = id - max_hist_len
+                if hist_start_id < 0:
+                    hist_start_id = 0
+                # If exist done before the last experience (not include the done in id), start from the index next to the done.
+                if len(np.where(self.done_buf[hist_start_id:id] == 1)[0]) != 0:
+                    hist_start_id = hist_start_id + (np.where(self.done_buf[hist_start_id:id] == 1)[0][-1]) + 1
+                hist_seg_len = id - hist_start_id
+                hist_obs_len[i] = hist_seg_len
+                hist_obs[i] = self.obs_buf[hist_start_id:id]
+                hist_act[i] = self.act_buf[hist_start_id:id]
+                # If the first experience of an episode is sampled, the hist lengths are different for obs and obs2.
+                if hist_seg_len == 0:
+                    hist_obs2_len[i] = 1
+                else:
+                    hist_obs2_len[i] = hist_seg_len
+                hist_obs2[i] = self.obs2_buf[hist_start_id:id]
+                hist_act2[i] = self.act_buf[hist_start_id+1:id+1]
 
-                    # Only keep experiences after the last done
-                    obs_keep_part = np.copy(hist_obs[batch_i, largest_done_id + 1:, :])
-                    act_keep_part = np.copy(hist_act[batch_i, largest_done_id + 1:, :])
-                    obs2_keep_part = np.copy(hist_obs2[batch_i, largest_done_id + 1:, :])
-                    act2_keep_part = np.copy(hist_act2[batch_i, largest_done_id + 1:, :])
-                    rew_keep_part = np.copy(hist_rew[batch_i, largest_done_id + 1:])
-                    done_keep_part = np.copy(hist_done[batch_i, largest_done_id + 1:])
-
-                    # Set to 0 to make sure all experiences are at the beginning
-                    hist_obs[batch_i] = np.zeros([max_hist_len, self.obs_dim])
-                    hist_act[batch_i] = np.zeros([max_hist_len, self.act_dim])
-                    hist_obs2[batch_i] = np.zeros([max_hist_len, self.obs_dim])
-                    hist_act2[batch_i] = np.zeros([max_hist_len, self.act_dim])
-                    hist_rew[batch_i] = np.zeros([max_hist_len])
-                    hist_done[batch_i] = np.zeros([max_hist_len])
-
-                    # Move kept experiences to the start of the segment
-                    hist_obs[batch_i, :max_hist_len - (largest_done_id + 1), :] = obs_keep_part
-                    hist_act[batch_i, :max_hist_len - (largest_done_id + 1), :] = act_keep_part
-                    hist_obs2[batch_i, :max_hist_len - (largest_done_id + 1), :] = obs2_keep_part
-                    hist_act2[batch_i, :max_hist_len - (largest_done_id + 1), :] = act2_keep_part
-                    hist_rew[batch_i, :max_hist_len - (largest_done_id + 1)] = rew_keep_part
-                    hist_done[batch_i, :max_hist_len - (largest_done_id + 1)] = done_keep_part
-        #
         batch = dict(obs=self.obs_buf[idxs],
                      obs2=self.obs2_buf[idxs],
                      act=self.act_buf[idxs],
@@ -127,10 +105,10 @@ class ReplayBuffer:
                      hist_act=hist_act,
                      hist_obs2=hist_obs2,
                      hist_act2=hist_act2,
-                     hist_rew=hist_rew,
-                     hist_done=hist_done,
-                     hist_len=hist_len)
+                     hist_obs_len=hist_obs_len,
+                     hist_obs2_len=hist_obs2_len)
         return {k: torch.as_tensor(v, dtype=torch.float32) for k, v in batch.items()}
+
 
 #######################################################################################
 
@@ -674,15 +652,14 @@ def lstm_td3(resume_exp_dir=None,
     # Set up function for computing TD3 Q-losses
     def compute_loss_q(data):
         o, a, r, o2, d = data['obs'], data['act'], data['rew'], data['obs2'], data['done']
-        h_o, h_a, h_o2, h_a2, h_len = data['hist_obs'], data['hist_act'], data['hist_obs2'], data['hist_act2'], data[
-            'hist_len']
+        h_o, h_a, h_o2, h_a2, h_o_len, h_o2_len = data['hist_obs'], data['hist_act'], data['hist_obs2'], data['hist_act2'], data['hist_obs_len'], data['hist_obs2_len']
 
-        q1, q1_hist_out, q1_memory_gate, q1_extracted_memory = ac.q1(o, a, h_o, h_a, h_len)
-        q2, q2_hist_out, q2_memory_gate, q2_extracted_memory = ac.q2(o, a, h_o, h_a, h_len)
+        q1, q1_hist_out, q1_memory_gate, q1_extracted_memory = ac.q1(o, a, h_o, h_a, h_o_len)
+        q2, q2_hist_out, q2_memory_gate, q2_extracted_memory = ac.q2(o, a, h_o, h_a, h_o_len)
 
         # Bellman backup for Q functions
         with torch.no_grad():
-            pi_targ, _, _, _ = ac_targ.pi(o2, h_o2, h_a2, h_len)
+            pi_targ, _, _, _ = ac_targ.pi(o2, h_o2, h_a2, h_o2_len)
 
             # Target policy smoothing
             if use_target_policy_smooth:
@@ -694,8 +671,8 @@ def lstm_td3(resume_exp_dir=None,
                 a2 = pi_targ
 
             # Target Q-values
-            q1_pi_targ, _, _, _ = ac_targ.q1(o2, a2, h_o2, h_a2, h_len)
-            q2_pi_targ, _, _, _ = ac_targ.q2(o2, a2, h_o2, h_a2, h_len)
+            q1_pi_targ, _, _, _ = ac_targ.q1(o2, a2, h_o2, h_a2, h_o2_len)
+            q2_pi_targ, _, _, _ = ac_targ.q2(o2, a2, h_o2, h_a2, h_o2_len)
 
             if use_double_critic:
                 q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ)
@@ -727,9 +704,9 @@ def lstm_td3(resume_exp_dir=None,
 
     # Set up function for computing TD3 pi loss
     def compute_loss_pi(data):
-        o, h_o, h_a, h_len = data['obs'], data['hist_obs'], data['hist_act'], data['hist_len']
-        a, a_hist_out, a_memory_gate, a_extracted_memory = ac.pi(o, h_o, h_a, h_len)
-        q1_pi, _, _, _ = ac.q1(o, a, h_o, h_a, h_len)
+        o, h_o, h_a, h_o_len = data['obs'], data['hist_obs'], data['hist_act'], data['hist_obs_len']
+        a, a_hist_out, a_memory_gate, a_extracted_memory = ac.pi(o, h_o, h_a, h_o_len)
+        q1_pi, _, _, _ = ac.q1(o, a, h_o, h_a, h_o_len)
         loss_info = dict(ActHistOut=a_hist_out.mean(dim=1).detach().cpu().numpy(),
                          ActMemoryGate=a_memory_gate.mean(dim=1).detach().cpu().numpy(),
                          ActExtractedMemory=a_extracted_memory.mean(dim=1).detach().cpu().numpy())
@@ -840,38 +817,37 @@ def lstm_td3(resume_exp_dir=None,
         o_buff_len = 0
 
     if resume_exp_dir is not None:
-        if proc_id() == 0:
-            # Find the latest checkpoint
-            resume_checkpoint_path = osp.join(resume_exp_dir, "pyt_save")
-            checkpoint_files = os.listdir(resume_checkpoint_path)
-            latest_context_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
-                                             'context' in f_name and 'verified' in f_name])
-            latest_model_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
-                                           'model' in f_name and 'verified' in f_name])
-            if latest_context_version != latest_model_version:
-                latest_version = np.min([latest_context_version, latest_model_version])
-            else:
-                latest_version = latest_context_version
-            latest_context_checkpoint_file_name = 'checkpoint-context-Step-{}-verified.pt'.format(latest_version)
-            latest_model_checkpoint_file_name = 'checkpoint-model-Step-{}-verified.pt'.format(latest_version)
-            latest_context_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_context_checkpoint_file_name)
-            latest_model_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_model_checkpoint_file_name)
+        # Find the latest checkpoint
+        resume_checkpoint_path = osp.join(resume_exp_dir, "pyt_save")
+        checkpoint_files = os.listdir(resume_checkpoint_path)
+        latest_context_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
+                                         'context' in f_name and 'verified' in f_name])
+        latest_model_version = np.max([int(f_name.split('-')[3]) for f_name in checkpoint_files if
+                                       'model' in f_name and 'verified' in f_name])
+        if latest_context_version != latest_model_version:
+            latest_version = np.min([latest_context_version, latest_model_version])
+        else:
+            latest_version = latest_context_version
+        latest_context_checkpoint_file_name = 'checkpoint-context-Step-{}-verified.pt'.format(latest_version)
+        latest_model_checkpoint_file_name = 'checkpoint-model-Step-{}-verified.pt'.format(latest_version)
+        latest_context_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_context_checkpoint_file_name)
+        latest_model_checkpoint_file_path = osp.join(resume_checkpoint_path, latest_model_checkpoint_file_name)
 
-            # Load the latest checkpoint
-            context_checkpoint = torch.load(latest_context_checkpoint_file_path)
-            model_checkpoint = torch.load(latest_model_checkpoint_file_path)
+        # Load the latest checkpoint
+        context_checkpoint = torch.load(latest_context_checkpoint_file_path)
+        model_checkpoint = torch.load(latest_model_checkpoint_file_path)
 
-            # Restore experiment context
-            logger.epoch_dict = context_checkpoint['logger_epoch_dict']
-            replay_buffer = context_checkpoint['replay_buffer']
-            start_time = context_checkpoint['start_time']
-            past_t = context_checkpoint['t'] + 1  # Crucial add 1 step to t to avoid repeating.
+        # Restore experiment context
+        logger.epoch_dict = context_checkpoint['logger_epoch_dict']
+        replay_buffer = context_checkpoint['replay_buffer']
+        start_time = context_checkpoint['start_time']
+        past_t = context_checkpoint['t'] + 1  # Crucial add 1 step to t to avoid repeating.
 
-            # Restore model
-            ac.load_state_dict(model_checkpoint['ac_state_dict'])
-            ac_targ.load_state_dict(model_checkpoint['target_ac_state_dict'])
-            pi_optimizer.load_state_dict(model_checkpoint['pi_optimizer_state_dict'])
-            q_optimizer.load_state_dict(model_checkpoint['q_optimizer_state_dict'])
+        # Restore model
+        ac.load_state_dict(model_checkpoint['ac_state_dict'])
+        ac_targ.load_state_dict(model_checkpoint['target_ac_state_dict'])
+        pi_optimizer.load_state_dict(model_checkpoint['pi_optimizer_state_dict'])
+        q_optimizer.load_state_dict(model_checkpoint['q_optimizer_state_dict'])
 
     print("past_t={}".format(past_t))
     # Main loop: collect experience in env and update/log each epoch
@@ -930,38 +906,37 @@ def lstm_td3(resume_exp_dir=None,
                 o_buff_len = 0
 
             # Store checkpoint at the end of trajectory, so there is no need to store env as resume env in PyBullet is problematic.
-            if proc_id() == 0:
-                # Save the context of the learning and learned models
-                fpath = 'pyt_save'
-                fpath = osp.join(logger.output_dir, fpath)
-                os.makedirs(fpath, exist_ok=True)
-                old_checkpoints = os.listdir(fpath)  # Cache old checkpoints to delete later
-                # Separately save context and model to reduce disk space usage.
-                context_fname = 'checkpoint-context-' + (
-                    'Step-%d' % t if t is not None else '') + '.pt'
-                model_fname = 'checkpoint-model-' + ('Step-%d' % t if t is not None else '') + '.pt'
+            # Save the context of the learning and learned models
+            fpath = 'pyt_save'
+            fpath = osp.join(logger.output_dir, fpath)
+            os.makedirs(fpath, exist_ok=True)
+            old_checkpoints = os.listdir(fpath)  # Cache old checkpoints to delete later
+            # Separately save context and model to reduce disk space usage.
+            context_fname = 'checkpoint-context-' + (
+                'Step-%d' % t if t is not None else '') + '.pt'
+            model_fname = 'checkpoint-model-' + ('Step-%d' % t if t is not None else '') + '.pt'
 
-                context_elements = {'env': env, 'replay_buffer': replay_buffer,
-                                    'logger_epoch_dict': logger.epoch_dict,
-                                    'start_time': start_time, 't': t}
-                model_elements = {'ac_state_dict': ac.state_dict(),
-                                  'target_ac_state_dict': ac_targ.state_dict(),
-                                  'pi_optimizer_state_dict': pi_optimizer.state_dict(),
-                                  'q_optimizer_state_dict': q_optimizer.state_dict()}
-                context_fname = osp.join(fpath, context_fname)
-                torch.save(context_elements, context_fname)
-                model_fname = osp.join(fpath, model_fname)
-                torch.save(model_elements, model_fname)
-                # Rename the file to verify the completion of the saving.
-                verified_context_fname = osp.join(fpath, 'checkpoint-context-' + (
-                    'Step-%d' % t if t is not None else '') + '-verified.pt')
-                verified_model_fname = osp.join(fpath, 'checkpoint-model-' + (
-                    'Step-%d' % t if t is not None else '') + '-verified.pt')
-                os.rename(context_fname, verified_context_fname)
-                os.rename(model_fname, verified_model_fname)
-                # Remove old checkpoint
-                for old_f in old_checkpoints:
-                    os.remove(osp.join(fpath, old_f))
+            context_elements = {'env': env, 'replay_buffer': replay_buffer,
+                                'logger_epoch_dict': logger.epoch_dict,
+                                'start_time': start_time, 't': t}
+            model_elements = {'ac_state_dict': ac.state_dict(),
+                              'target_ac_state_dict': ac_targ.state_dict(),
+                              'pi_optimizer_state_dict': pi_optimizer.state_dict(),
+                              'q_optimizer_state_dict': q_optimizer.state_dict()}
+            context_fname = osp.join(fpath, context_fname)
+            torch.save(context_elements, context_fname)
+            model_fname = osp.join(fpath, model_fname)
+            torch.save(model_elements, model_fname)
+            # Rename the file to verify the completion of the saving.
+            verified_context_fname = osp.join(fpath, 'checkpoint-context-' + (
+                'Step-%d' % t if t is not None else '') + '-verified.pt')
+            verified_model_fname = osp.join(fpath, 'checkpoint-model-' + (
+                'Step-%d' % t if t is not None else '') + '-verified.pt')
+            os.rename(context_fname, verified_context_fname)
+            os.rename(model_fname, verified_model_fname)
+            # Remove old checkpoint
+            for old_f in old_checkpoints:
+                os.remove(osp.join(fpath, old_f))
 
         # Update handling
         if t >= update_after and t % update_every == 0:
@@ -1016,11 +991,10 @@ def list2tuple(v):
     return tuple(v)
 
 if __name__ == '__main__':
-    print("Process ID: {}".format(proc_id()))
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--resume_exp_dir', type=str, default=None, help="The directory of the resuming experiment.")
-    parser.add_argument('--env_name', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--env_name', type=str, default='HalfCheetahBulletEnv-v0')
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=400)
@@ -1072,28 +1046,29 @@ if __name__ == '__main__':
 
     # Set log data saving directory
     if args.resume_exp_dir is None:
-        from spinup.utils.run_utils import setup_logger_kwargs
+        # data_dir = osp.join(
+        #     osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
+        #     args.data_dir)
         data_dir = osp.join(
-            osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.dirname(osp.abspath(__file__))))))),
+            osp.dirname('F:/scratch/lingheng/'),
             args.data_dir)
         logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed, data_dir, datestamp=True)
     else:
-        if proc_id() == 0:
-            # Load config_json
-            resume_exp_dir = args.resume_exp_dir
-            config_path = osp.join(args.resume_exp_dir, 'config.json')
-            with open(osp.join(args.resume_exp_dir, "config.json"), 'r') as config_file:
-                config_json = json.load(config_file)
-            # Update resume_exp_dir value as default is None.
-            config_json['resume_exp_dir'] = resume_exp_dir
-            # Print config_json
-            output = json.dumps(config_json, separators=(',', ':\t'), indent=4, sort_keys=True)
-            print(colorize('Loading config:\n', color='cyan', bold=True))
-            print(output)
-            # Restore the hyper-parameters
-            logger_kwargs = config_json["logger_kwargs"]   # Restore logger_kwargs
-            config_json.pop('logger', None)                # Remove logger from config_json
-            args = json.loads(json.dumps(config_json), object_hook=lambda d: namedtuple('args', d.keys())(*d.values()))
+        # Load config_json
+        resume_exp_dir = args.resume_exp_dir
+        config_path = osp.join(args.resume_exp_dir, 'config.json')
+        with open(osp.join(args.resume_exp_dir, "config.json"), 'r') as config_file:
+            config_json = json.load(config_file)
+        # Update resume_exp_dir value as default is None.
+        config_json['resume_exp_dir'] = resume_exp_dir
+        # Print config_json
+        output = json.dumps(config_json, separators=(',', ':\t'), indent=4, sort_keys=True)
+        print(colorize('Loading config:\n', color='cyan', bold=True))
+        print(output)
+        # Restore the hyper-parameters
+        logger_kwargs = config_json["logger_kwargs"]   # Restore logger_kwargs
+        config_json.pop('logger', None)                # Remove logger from config_json
+        args = json.loads(json.dumps(config_json), object_hook=lambda d: namedtuple('args', d.keys())(*d.values()))
 
 
     lstm_td3(resume_exp_dir=args.resume_exp_dir,
