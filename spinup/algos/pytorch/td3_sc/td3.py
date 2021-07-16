@@ -450,8 +450,33 @@ def td3(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                     ac.pi.layers[h_i].weight.grad[ac.pi.layers[h_i].weight.grad == 0] = np.random.uniform(-1, 1)*1e-6 # np.random.rand() * 1e-8
                     ac.pi.layers[h_i].bias.grad[ac.pi.layers[h_i].bias.grad == 0] = np.random.uniform(-1, 1)*1e-6 # np.random.rand() * 1e-8
 
+                    # # Random set value for |grad| less than 1e-6
+                    # grad_threshold = 1
+                    # ac.pi.layers[h_i].weight.grad[torch.abs(ac.pi.layers[h_i].weight.grad) < grad_threshold] = np.random.uniform(-1, 1) * grad_threshold
+                    # ac.pi.layers[h_i].bias.grad[torch.abs(ac.pi.layers[h_i].bias.grad) < grad_threshold] = np.random.uniform(-1, 1) * grad_threshold
+
                     grad_log['AfterTunedLayer{}PiWeightGrad'.format(h_i)] = ac.pi.layers[h_i].weight.grad.cpu().detach().numpy()
                     grad_log['AfterTunedLayer{}PiBiasGrad'.format(h_i)] = ac.pi.layers[h_i].bias.grad.cpu().detach().numpy()
+            # # Tune grad
+            # grad_log = {}
+            # for h_i in range(len(ac.pi.layers)):
+            #     if h_i % 2 == 0:
+            #         grad_log['Layer{}PiWeightGrad'.format(h_i)] = ac.pi.layers[h_i].weight.grad.cpu().detach().numpy()
+            #         grad_log['Layer{}PiBiasGrad'.format(h_i)] = ac.pi.layers[h_i].bias.grad.cpu().detach().numpy()
+            #
+            #         # Random set value for grad equal to 0
+            #         # import pdb; pdb.set_trace()
+            #         with torch.no_grad():
+            #             # ac.pi.layers[h_i].weight[ac.pi.layers[h_i].weight.grad == 0] = ac.pi.layers[h_i].weight[ac.pi.layers[h_i].weight.grad == 0]+np.random.uniform(-1, 1)*1e-6 # np.random.rand() * 1e-8
+            #             # ac.pi.layers[h_i].bias[ac.pi.layers[h_i].bias.grad == 0] = ac.pi.layers[h_i].bias[ac.pi.layers[h_i].bias.grad == 0]+np.random.uniform(-1, 1)*1e-6 # np.random.rand() * 1e-8
+            #             ac.pi.layers[h_i].weight[ac.pi.layers[h_i].weight.grad == 0] = np.random.uniform(-1, 1) * 1e-2  # np.random.rand() * 1e-8
+            #             ac.pi.layers[h_i].bias[ac.pi.layers[h_i].bias.grad == 0] = np.random.uniform(-1, 1) * 1e-2  # np.random.rand() * 1e-8
+            #
+            #         grad_log['AfterTunedLayer{}PiWeightGrad'.format(h_i)] = ac.pi.layers[h_i].weight.grad.cpu().detach().numpy()
+            #         grad_log['AfterTunedLayer{}PiBiasGrad'.format(h_i)] = ac.pi.layers[h_i].bias.grad.cpu().detach().numpy()
+            # pi_optimizer.zero_grad()
+            # loss_pi = compute_loss_pi(data)
+            # loss_pi.backward()
             #
             pi_optimizer.step()
 

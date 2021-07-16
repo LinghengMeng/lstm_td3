@@ -26,10 +26,10 @@ SUBSTITUTIONS = {'env': 'env_name',
                  'dt': 'datestamp'}
 
 # Only some algorithms can be parallelized (have num_cpu > 1):
-MPI_COMPATIBLE_ALGOS = ['vpg', 'trpo', 'ppo']
+MPI_COMPATIBLE_ALGOS = ['vpg', 'trpo', 'ppo_mpi']
 
 # Algo names (used in a few places)
-BASE_ALGO_NAMES = ['vpg', 'trpo', 'ppo', 'ddpg', 'td3', 'sac']
+BASE_ALGO_NAMES = ['vpg', 'trpo', 'ppo_mpi', 'ddpg', 'td3', 'sac']
 
 
 def add_with_backends(algo_list):
@@ -222,7 +222,7 @@ if __name__ == '__main__':
             FYI: When running an algorithm, any keyword argument to the
             algorithm function can be used as a flag, eg
 
-            \tpython -m spinup.run ppo --env HalfCheetah-v2 --clip_ratio 0.1
+            \tpython -m spinup.run ppo_mpi --env HalfCheetah-v2 --clip_ratio 0.1
 
             If you need a quick refresher on valid kwargs, get the docstring
             with

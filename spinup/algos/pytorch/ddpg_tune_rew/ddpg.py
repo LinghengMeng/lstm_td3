@@ -32,14 +32,14 @@ class ReplayBuffer:
         self.ptr = (self.ptr+1) % self.max_size
         self.size = min(self.size+1, self.max_size)
 
-    def sample_batch(self, batch_size=32):
+    def sample_batch(self, batch_size=32, device=None):
         idxs = np.random.randint(0, self.size, size=batch_size)
         batch = dict(obs=self.obs_buf[idxs],
                      obs2=self.obs2_buf[idxs],
                      act=self.act_buf[idxs],
                      rew=self.rew_buf[idxs],
                      done=self.done_buf[idxs])
-        return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in batch.items()}
+        return {k: torch.as_tensor(v, dtype=torch.float32).to(device) for k,v in batch.items()}
 
 
 
@@ -150,6 +150,10 @@ def ddpg(env_name, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
     ac_targ = deepcopy(ac)
 
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    ac.to(device)
+    ac_targ.to(device)
+
     # Freeze target networks with respect to optimizers (only update via polyak averaging)
     for p in ac_targ.parameters():
         p.requires_grad = False
@@ -176,7 +180,7 @@ def ddpg(env_name, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
         loss_q = ((q - backup)**2).mean()
 
         # Useful info for logging
-        loss_info = dict(QVals=q.detach().numpy())
+        loss_info = dict(QVals=q.cpu().detach().numpy())
 
         return loss_q, loss_info
 
@@ -227,7 +231,7 @@ def ddpg(env_name, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                 p_targ.data.add_((1 - polyak) * p.data)
 
     def get_action(o, noise_scale):
-        a = ac.act(torch.as_tensor(o, dtype=torch.float32))
+        a = ac.act(torch.as_tensor(o, dtype=torch.float32).to(device))
         a += noise_scale * np.random.randn(act_dim)
         return np.clip(a, -act_limit, act_limit)
 
@@ -288,7 +292,7 @@ def ddpg(env_name, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
         # Update handling
         if t >= update_after and t % update_every == 0:
             for _ in range(update_every):
-                batch = replay_buffer.sample_batch(batch_size)
+                batch = replay_buffer.sample_batch(batch_size, device=device)
                 update(data=batch)
 
         # End of epoch handling
@@ -336,7 +340,7 @@ if __name__ == '__main__':
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--tune_reward_type', type=str, choices=['addition_tunning', 'multiplication_tunning'],
                         default=None)
     parser.add_argument('--tune_rew_addend', type=float, default=0)

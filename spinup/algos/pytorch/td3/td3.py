@@ -321,7 +321,7 @@ def td3(env_name, partially_observable=False,
 
         # Useful info for logging
         loss_info = dict(Q1Vals=q1.cpu().detach().numpy(),
-                         Q2Vals=q2.cpu().detach().numpy())
+                         Q2Vals=q2.cpu().detach().numpy(), Rew=r.cpu().detach().numpy())
 
         return loss_q, loss_info, q1, q2, backup, q1_pi_targ, q2_pi_targ, avg_q_pi_targ
 

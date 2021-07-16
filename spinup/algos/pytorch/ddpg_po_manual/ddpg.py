@@ -250,7 +250,8 @@ def ddpg(env_name, partially_observable=False,
 
         # Bellman backup for Q function
         with torch.no_grad():
-            q_pi_targ = ac_targ.q(o2, ac_targ.pi(o2))
+            # q_pi_targ = ac_targ.q(o2, ac_targ.pi(o2))
+            q_pi_targ = ac.q(o2, ac.pi(o2))
 
             mean_targ_next_q_hist = []
             tuned_indicator = np.zeros(q_pi_targ.shape)
@@ -461,7 +462,7 @@ if __name__ == '__main__':
     parser.add_argument('--random_sensor_missing_prob', type=float, default=0.1)
     parser.add_argument('--change_rate_threshold', type=float, default=1)
     parser.add_argument('--hid', type=int, default=256)
-    parser.add_argument('--l', type=int, default=3)
+    parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=200)

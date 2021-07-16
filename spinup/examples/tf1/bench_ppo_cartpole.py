@@ -9,7 +9,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_runs', type=int, default=3)
     args = parser.parse_args()
 
-    eg = ExperimentGrid(name='ppo-tf1-bench')
+    eg = ExperimentGrid(name='ppo_mpi-tf1-bench')
     eg.add('env_name', 'CartPole-v0', '', True)
     eg.add('seed', [10*i for i in range(args.num_runs)])
     eg.add('epochs', 10)

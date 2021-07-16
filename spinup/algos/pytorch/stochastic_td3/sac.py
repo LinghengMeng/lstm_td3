@@ -203,7 +203,7 @@ def sac(env_name, partially_observable=False,
         with torch.no_grad():
             # Target actions come from *current* policy
             # a2, logp_a2, log_std_a2, a2_dist = ac.pi(o2)
-            a2, logp_a2, log_std_a2, a2_dist = ac_targ.pi(o2)
+            a2, logp_a2, mu_a2, log_std_a2, a2_dist = ac_targ.pi(o2)
 
             # sample_num = 500
             # sampled_a2 = a2_dist.rsample(torch.Size([sample_num]))
@@ -239,7 +239,7 @@ def sac(env_name, partially_observable=False,
     # Set up function for computing SAC pi loss
     def compute_loss_pi(data):
         o = data['obs']
-        pi, logp_pi, log_std, pi_dist = ac.pi(o)
+        pi, logp_pi, mu, log_std, pi_dist = ac.pi(o)
         # sample_num = 500
         # sampled_pi = pi_dist.rsample(torch.Size([sample_num]))
         # repeated_o = o.repeat(sample_num, 1)
@@ -248,17 +248,24 @@ def sac(env_name, partially_observable=False,
         # sampled_q = ac.q1(repeated_o, reshaped_sample_pi)
         # avg_q1_pi = torch.reshape(sampled_q, (sample_num, -1)).mean(axis=0)
         # loss_pi = (- avg_q1_pi).mean()
+        # import pdb; pdb.set_trace()
 
         q1_pi = ac.q1(o, pi)
         q2_pi = ac.q2(o, pi)
         q_pi = torch.min(q1_pi, q2_pi)
-        # import pdb; pdb.set_trace()
+
+        # Mean not working
+        # q1_pi = ac.q1(o, mu)
+        # q_pi = q1_pi
+        # loss_pi = (- q_pi).mean()
+
         # Entropy-regularized policy loss
         # loss_pi = (alpha * logp_pi - q_pi).mean()
         # loss_pi = (- q_pi).mean()
         # loss_pi = (logp_pi - q_pi).mean()
         loss_pi = (alpha * logp_pi - q_pi).mean()
         # loss_pi = (1e-8*log_std.sum(axis=1) - q_pi).mean()
+        # loss_pi = (1e-4 * pi_dist.entropy().sum(axis=1) - q_pi).mean()
 
         # Useful info for logging
         pi_info = dict(LogPi=logp_pi.cpu().detach().numpy(),
